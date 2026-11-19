@@ -13,7 +13,7 @@ a:hover { color: #173a78; }
 a:focus-visible { outline: 3px solid #316ae3; outline-offset: 3px; }
 .hero { text-align: center; background: linear-gradient(180deg, #e9f0ff, #f5f7fb); padding: 56px 0 24px; }
 h1, h2, .authors, nav { font-family: "Google Sans", "Segoe UI", Arial, sans-serif; }
-h1 { margin: 0 auto 22px; font-size: clamp(2rem, 4.1vw, 3.05rem); line-height: 1.14; letter-spacing: -0.036em; }
+h1 { text-wrap: balance; margin: 0 auto 22px; font-size: clamp(2rem, 4.1vw, 3.05rem); line-height: 1.14; letter-spacing: -0.036em; }
 h1 span { background: linear-gradient(transparent 72%, #ffe08a 72%, #ffe08a 95%, transparent 95%); box-decoration-break: clone; }
 ul { list-style: none; padding: 0; margin: 0; }
 .authors, .affiliations, nav { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; }
@@ -42,7 +42,6 @@ footer { padding: 8px 0 40px; text-align: center; color: #5d6879; font-size: .87
 @media (max-width: 640px) {
   .wrap { width: calc(100% - 24px); }
   .hero { padding-top: 35px; }
-  .desktop-break { display: none; }
   .authors { gap: 2px 12px; font-size: 1.04rem; }
   .affiliations { font-size: .91rem; }
   nav a { padding: 8px 13px; }
