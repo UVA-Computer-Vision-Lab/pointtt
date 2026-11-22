@@ -1,0 +1,17 @@
+# data, checkpoints and evaluation outputs
+/data/
+/checkpoints/
+/exp/
+*.pth
+
+# environments and build artefacts
+/env/
+/env-*/
+build/
+*.egg-info/
+*.so
+__pycache__/
+*.py[cod]
+
+# logging tools
+wandb/
