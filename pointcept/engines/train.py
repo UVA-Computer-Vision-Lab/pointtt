@@ -6,8 +6,9 @@ Please cite our work if the code is helpful to you.
 
 TrainerBase follows the hook-based training loop of detectron2 (Apache-2.0).
 Modified for PoinTTT: optional W&B logging (`enable_wandb`), evaluation-only runs
-(`is_train = False`), gradient accumulation (`grad_accum_steps`) and support for models that
-run backward() inside their forward pass (StreamingSegmentorV2).
+(`is_train = False`), gradient accumulation (`grad_accum_steps`), support for models that
+run backward() inside their forward pass (StreamingSegmentorV2), and single-process
+reproductions of multi-GPU runs (`ddp_emulate_world_size`, `ddp_replay_world_size`).
 """
 
 import os
@@ -42,6 +43,45 @@ except ImportError:
     wandb = None
 
 TRAINERS = Registry("trainers")
+
+
+class ReplayRanksSampler(torch.utils.data.distributed.DistributedSampler):
+    """One process drawing, in order, the batches of every rank of a DDP run.
+
+    Loader batch i (batch_size = per-rank batch) is the batch that rank
+    i % num_replicas drew at iteration i // num_replicas of a
+    num_replicas-process run (DistributedSampler + DataLoader(drop_last=True)).
+    With grad_accum_steps = num_replicas, one optimizer step then sees the same
+    samples, in the same per-rank groups, as one step of that run, and an epoch
+    has the same number of optimizer steps.
+    """
+
+    def __init__(self, dataset, num_replicas, batch_size):
+        super().__init__(dataset, num_replicas=num_replicas, rank=0)
+        self.batch_size = batch_size
+        self.num_iters = self.num_samples // batch_size  # per rank, drop_last
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        indices = torch.randperm(len(self.dataset), generator=g).tolist()
+        padding_size = self.total_size - len(indices)
+        if padding_size <= len(indices):
+            indices += indices[:padding_size]
+        else:
+            indices += (indices * (padding_size // len(indices) + 1))[:padding_size]
+        w, b = self.num_replicas, self.batch_size
+        return iter(
+            [
+                indices[r + w * (k * b + j)]
+                for k in range(self.num_iters)
+                for r in range(w)
+                for j in range(b)
+            ]
+        )
+
+    def __len__(self):
+        return self.num_iters * self.num_replicas * self.batch_size
 
 
 class TrainerBase:
@@ -162,7 +202,17 @@ class Trainer(TrainerBase):
     def build_scheduler(self):
         assert hasattr(self, "optimizer")
         assert hasattr(self, "train_loader")
-        self.cfg.scheduler.total_steps = len(self.train_loader) * self.cfg.eval_epoch
+        steps_per_epoch = len(self.train_loader)
+        replay = int(getattr(self.cfg, "ddp_replay_world_size", 0) or 0)
+        if replay > 1 and comm.get_world_size() == 1:
+            # replay mode (see build_train_loader): run_step() steps the scheduler
+            # once per `replay` loader iterations, like the run it replays.
+            steps_per_epoch //= replay
+            self.logger.info(
+                f"Scheduler: {steps_per_epoch} optimizer steps/epoch x "
+                f"{self.cfg.eval_epoch} epochs = {steps_per_epoch * self.cfg.eval_epoch} total steps"
+            )
+        self.cfg.scheduler.total_steps = steps_per_epoch * self.cfg.eval_epoch
         return build_scheduler(self.cfg.scheduler, self.optimizer)
 
     def init_wandb(self):
@@ -194,7 +244,11 @@ class Trainer(TrainerBase):
             if self.cfg.is_train:
                 for self.epoch in range(self.start_epoch, self.max_epoch):
                     # => before epoch
-                    if comm.get_world_size() > 1:
+                    # (also in one process when the sampler emulates or replays DDP ranks)
+                    if comm.get_world_size() > 1 or isinstance(
+                        self.train_loader.sampler,
+                        torch.utils.data.distributed.DistributedSampler,
+                    ):
                         self.train_loader.sampler.set_epoch(self.epoch)
                     self.model.train()
                     self.data_iterator = enumerate(self.train_loader)
@@ -355,8 +409,36 @@ class Trainer(TrainerBase):
     def build_train_loader(self):
         train_data = build_dataset(self.cfg.data.train)
 
+        emulate = int(getattr(self.cfg, "ddp_emulate_world_size", 0) or 0)
+        replay = int(getattr(self.cfg, "ddp_replay_world_size", 0) or 0)
+        accum_steps = max(1, int(getattr(self.cfg, "grad_accum_steps", 1)))
         if comm.get_world_size() > 1:
+            # a run started in replay mode keeps both keys in its config.py
+            assert replay <= 1 or accum_steps == 1, (
+                f"this run was started with ddp_replay_world_size={replay}: "
+                "continue it under real DDP with grad_accum_steps=1"
+            )
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
+        elif replay > 1:
+            # One process that draws the batches of all `replay` ranks in turn;
+            # with grad_accum_steps = replay each optimizer step is the step of
+            # the `replay`-process run (see ReplayRanksSampler).
+            assert accum_steps == replay, (
+                f"ddp_replay_world_size={replay} needs grad_accum_steps={replay} "
+                f"(got {accum_steps})"
+            )
+            train_sampler = ReplayRanksSampler(
+                train_data, replay, self.cfg.batch_size_per_gpu
+            )
+        elif emulate > 1:
+            # One process that sees exactly the data stream of rank 0 in an
+            # `emulate`-process run (same shard of every epoch's permutation,
+            # same number of iterations per epoch). A StreamingSegmentorV2 run
+            # without `streaming_grad_sync` never averages gradients across
+            # ranks, so this process trains exactly like rank 0 of that run.
+            train_sampler = torch.utils.data.distributed.DistributedSampler(
+                train_data, num_replicas=emulate, rank=0
+            )
         else:
             train_sampler = None
 
@@ -405,5 +487,14 @@ class Trainer(TrainerBase):
         return val_loader
 
     def build_scaler(self):
-        scaler = torch.amp.GradScaler("cuda") if self.cfg.enable_amp else None
+        # replay mode: run_step() divides the loss by grad_accum_steps (= replay)
+        # before scaling it; starting the scale that much higher keeps
+        # scale * loss of a micro-batch what each rank of the replayed run had.
+        replay = int(getattr(self.cfg, "ddp_replay_world_size", 0) or 0)
+        init_scale = 2.0**16 * (replay if replay > 1 and comm.get_world_size() == 1 else 1)
+        scaler = (
+            torch.amp.GradScaler("cuda", init_scale=init_scale)
+            if self.cfg.enable_amp
+            else None
+        )
         return scaler

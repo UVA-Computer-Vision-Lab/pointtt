@@ -12,12 +12,21 @@ Key differences vs PT-v3-LaCT-Dec (spatial parent):
 
 Use with ``StreamingSegmentorV2`` for the per-clip backward training loop.
 
+``lact_write_grad=True`` (see PT-v3-LaCT-Dec) records every slot's fast-weight
+writes of the mega-batch in training and flushes their gradient once after the
+last clip's backward. The retained write inputs grow with clips x slots x
+points per clip, so long sequences need few slots per GPU. It trains in fp32
+only: the HOI4D recipes use enable_amp=True, which must be set to False (under
+autocast the write recording raises).
+
 The per-slot fast-weight update of BatchedTTTLayer is adapted from LaCT
 (https://github.com/a1600012888/LaCT, Copyright (c) 2025 Tianyuan Zhang, Hao Tan,
 MIT License; see THIRD_PARTY_NOTICES.md).
 
 Author: Wentao
 """
+
+import itertools
 
 import torch
 import torch.nn as nn
@@ -48,6 +57,8 @@ class BatchedTTTLayer(_BaseTTTLayer):
 
     def __init__(self, *args, max_batch_size: int = 8, **kwargs):
         super().__init__(*args, **kwargs)
+        # write_grad: recorded state of each slot, {slot: (deltas, live)}.
+        self._slot_write_state = {}
         H = self.num_heads
         Dk = self.head_dim
         d_h = self.w0_init.shape[1]
@@ -78,6 +89,38 @@ class BatchedTTTLayer(_BaseTTTLayer):
         self.w0_delta.zero_()
         self.w1_delta.zero_()
         self.w2_delta.zero_()
+        self.clear_write_graph()
+
+    # ---- differentiable write history per slot (write_grad) ----
+    def clear_write_graph(self):
+        super().clear_write_graph()
+        self._slot_write_state.clear()
+
+    def _slot_state(self, b):
+        """(deltas, live) of slot b; starts as a detached copy of the buffer slot."""
+        if b not in self._slot_write_state:
+            self._slot_write_state[b] = (
+                tuple(buf[b].detach().clone()
+                      for buf in (self.w0_delta, self.w1_delta, self.w2_delta)),
+                False)
+        return self._slot_write_state[b]
+
+    def _read_leaves_slot(self, b):
+        """Fresh leaves holding slot b's current state for one grad-enabled read."""
+        state, live = self._slot_state(b)
+        leaves = tuple(d.detach().clone().requires_grad_(True) for d in state)
+        self._write_reads.append((state, leaves, live))
+        return leaves
+
+    def _record_write_slot(self, b, x):
+        """Recorded replacement of _delta_update for slot b (same values)."""
+        state, _ = self._slot_state(b)
+        deltas = self._run_write(
+            self._write_graph_fn, self._write_input(x), *self._write_params(), *state)
+        self._slot_write_state[b] = (deltas, True)
+        with torch.no_grad():
+            for buf, delta in zip((self.w0_delta, self.w1_delta, self.w2_delta), deltas):
+                buf[b].copy_(delta.detach())
 
     def forward(self, point):
         feat = point.feat
@@ -88,6 +131,7 @@ class BatchedTTTLayer(_BaseTTTLayer):
         if starts is None or len(starts) != len(offset) + 1:
             starts = [0] + offset.cpu().tolist()
         H, Dk = self.num_heads, self.head_dim
+        record = self._records_writes()
 
         outputs = []
         for b in range(len(starts) - 1):
@@ -165,10 +209,20 @@ class BatchedTTTLayer(_BaseTTTLayer):
                 # Causal online form: W_t = Update(W_{t-1}, H_t), then Apply
                 # with W_t. Re-read the updated delta so the output below uses
                 # state that includes this chunk (and nothing from the future).
-                _delta_update(w0_cur.detach(), w1_cur.detach(), w2_cur.detach())
+                if record:
+                    self._record_write_slot(b, x)
+                else:
+                    _delta_update(w0_cur.detach(), w1_cur.detach(), w2_cur.detach())
                 w0_cur = self.w0_init + self.w0_delta[b]
                 w1_cur = self.w1_init + self.w1_delta[b]
                 w2_cur = self.w2_init + self.w2_delta[b]
+
+            if record and torch.is_grad_enabled():
+                # Same values; the leaves collect this read's state adjoint.
+                read_leaves = self._read_leaves_slot(b)
+                w0_cur = self.w0_init + read_leaves[0]
+                w1_cur = self.w1_init + read_leaves[1]
+                w2_cur = self.w2_init + read_leaves[2]
 
             qi = ttt_q.transpose(1, 2)
             h = torch.bmm(w2_cur, qi)
@@ -180,7 +234,10 @@ class BatchedTTTLayer(_BaseTTTLayer):
 
             # Default order: apply first (above), then update slot b's delta.
             if not self.update_first and self.update_enabled:
-                _delta_update(w0_cur.detach(), w1_cur.detach(), w2_cur.detach())
+                if record:
+                    self._record_write_slot(b, x)
+                else:
+                    _delta_update(w0_cur.detach(), w1_cur.detach(), w2_cur.detach())
 
         out = torch.cat(outputs, dim=0)
         point.feat = point.feat + torch.tanh(self.residual_gate) * out
@@ -239,6 +296,8 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
                 grad_clip_val=grad_clip, inter_multi=inter_multi,
                 gate_init=gate_init,
                 max_batch_size=max_batch_size_per_gpu,
+                write_grad=self.lact_write_grad,
+                checkpoint_write=self.lact_write_grad_checkpoint,
             )
         self.enc_ttt_layers = new_enc
 
@@ -250,10 +309,14 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
                 grad_clip_val=grad_clip, inter_multi=inter_multi,
                 gate_init=gate_init,
                 max_batch_size=max_batch_size_per_gpu,
+                write_grad=self.lact_write_grad,
+                checkpoint_write=self.lact_write_grad_checkpoint,
             )
         self.dec_ttt_layers = new_dec
 
         self.max_batch_size_per_gpu = max_batch_size_per_gpu
+        for layer in itertools.chain(self.enc_ttt_layers.values(), self.dec_ttt_layers.values()):
+            assert layer.write_grad == self.lact_write_grad, "write_grad not propagated"
 
     def _set_ttt_updates(self, enabled: bool):
         for layer in self.enc_ttt_layers.values():
@@ -352,8 +415,8 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         )
         return chunk, per_slot_idx
 
-    # ---- training entry point ----
-    def grad_accum_forward(self, data_dict, seg_head, criteria):
+    # ---- training entry point (grad_accum_forward of the parent calls this) ----
+    def _grad_accum_forward(self, data_dict, seg_head, criteria):
         if "clip_idx" not in data_dict:
             raise KeyError("PT-v3-LaCT-Temporal needs per-point `clip_idx`.")
         clip_idx_full = data_dict["clip_idx"]
@@ -395,10 +458,14 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
             total_loss += loss_c.detach().double()
             del chunk_point, logits, loss_c, chunk
 
+        if self.lact_write_grad and self.train_with_ttt:
+            # every clip has run backward: one pass through all slots' write history
+            self._flush_all_write_gradients()
         return total_loss.item() / max(nw, 1)
 
     # ---- eval entry point ----
     def forward(self, data_dict):
+        self._check_write_grad_forward()
         if "clip_idx" not in data_dict:
             raise KeyError("PT-v3-LaCT-Temporal needs per-point `clip_idx`.")
         clip_idx_full = data_dict["clip_idx"]

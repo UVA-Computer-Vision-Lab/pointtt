@@ -79,7 +79,7 @@ def main():
                     help="also print which classes were skipped per block")
     ap.add_argument("--latest", action="store_true",
                     help="print just the most recent block in a single-line "
-                         "format suitable for tail/grep (used by scripts/eval_hoi4d.sh)")
+                         "format suitable for tail/grep (used by scripts/test.sh)")
     args = ap.parse_args()
 
     with open(args.log) as f:

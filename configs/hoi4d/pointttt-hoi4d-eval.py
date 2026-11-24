@@ -1,13 +1,13 @@
 """PoinTTT on HOI4D: evaluation of the released checkpoint on the 892 test sequences.
 
-Causal online inference over 3-frame chunks with 4 views per chunk, predictions mapped to all
+Causal online inference over 3-frame chunks, predictions mapped to all
 300 x 8192 raw points of every sequence by nearest neighbour. The reported number, pptr_mIoU, is
 computed from the log by scripts/pptr_miou.py.
 
-    bash scripts/eval_hoi4d.sh [path/to/pointttt_hoi4d.pth]
+    bash scripts/test.sh -d hoi4d [-g 4] [-w path/to/pointttt_hoi4d.pth]
 
 The defaults below are the reference setting: 4 GPUs x 8 sequences per GPU (batch_size = 32),
-2 loader workers per GPU (num_worker = 8). scripts/eval_hoi4d.sh sets batch_size,
+2 loader workers per GPU (num_worker = 8). scripts/test.sh sets batch_size,
 batch_size_val and num_worker for other GPU counts.
 """
 

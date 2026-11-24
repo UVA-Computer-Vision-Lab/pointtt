@@ -12,7 +12,7 @@ notices of their origin.
 | [LaCT](https://github.com/a1600012888/LaCT) | MIT, Copyright (c) 2025 Tianyuan Zhang, Hao Tan | `pointcept/models/point_transformer_v3/lact_layer.py` (copied); fast-weight update of the TTT layers in `point_transformer_v3_lact_dec.py` and `point_transformer_v3_lact_temporal.py` (adapted) |
 | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) | MIT, Copyright (c) 2024 Keller Jordan | Newton-Schulz iteration in `lact_layer.py` (via LaCT) |
 | [Moonlight](https://github.com/MoonshotAI/Moonlight) | MIT, Copyright (c) 2025 Moonshot AI | Newton-Schulz iteration in `lact_layer.py` (via LaCT) |
-| [detectron2](https://github.com/facebookresearch/detectron2) / [fvcore](https://github.com/facebookresearch/fvcore) | Apache-2.0, Copyright (c) Facebook, Inc. and its affiliates | `pointcept/utils/comm.py`, `pointcept/utils/events.py`, `pointcept/engines/launch.py`, `pointcept/engines/defaults.py`, `pointcept/engines/train.py` (TrainerBase), `pointcept/engines/hooks/default.py` |
+| [detectron2](https://github.com/facebookresearch/detectron2) / [fvcore](https://github.com/facebookresearch/fvcore) | Apache-2.0, Copyright (c) Facebook, Inc. and its affiliates | `pointcept/utils/comm.py`, `pointcept/utils/events.py`, `pointcept/utils/timer.py` (copied from fvcore), `pointcept/engines/launch.py`, `pointcept/engines/defaults.py`, `pointcept/engines/train.py` (TrainerBase), `pointcept/engines/hooks/default.py` |
 | [mmcv](https://github.com/open-mmlab/mmcv) | Apache-2.0, Copyright (c) OpenMMLab | `pointcept/utils/config.py`, `pointcept/utils/registry.py`, `pointcept/utils/path.py`, `pointcept/utils/logger.py`, `pointcept/utils/misc.py` (`is_seq_of`, `is_str`, `import_modules_from_strings`) |
 | [O-CNN](https://github.com/octree-nn/ocnn-pytorch) | MIT, Copyright (c) 2022 Peng-Shuai Wang | `pointcept/models/utils/serialization/z_order.py` |
 | [numpy-hilbert-curve](https://github.com/PrincetonLIPS/numpy-hilbert-curve) | MIT, Copyright (c) 2020 Princeton Laboratory for Intelligent Probabilistic Systems | `pointcept/models/utils/serialization/hilbert.py` |
@@ -50,6 +50,6 @@ SOFTWARE.
 
 | File | Origin | Licence |
 |---|---|---|
-| `pointcept/datasets/preprocessing/forainetv2/meta_data/test_list.txt` | [ForestFormer3D](https://github.com/SmartForest-no/ForestFormer3D), `data/ForAINetV2/meta_data/test_list.txt` (commit 6a75c37), unchanged | CC BY-NC 4.0 |
+| `pointcept/datasets/preprocessing/forainetv2/meta_data/{train,val,test}_list.txt` | [ForestFormer3D](https://github.com/SmartForest-no/ForestFormer3D), `data/ForAINetV2/meta_data/{train,val,test}_list.txt` (commit 6a75c37), unchanged | CC BY-NC 4.0 |
 
 The datasets themselves are not part of this repository; see the README for their sources and licences.

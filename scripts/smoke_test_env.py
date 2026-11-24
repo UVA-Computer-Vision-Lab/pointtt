@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Environment check for the PoinTTT evaluation code (run by scripts/setup_env.sh at the end).
+"""Environment check for the PoinTTT code (run by scripts/setup_env.sh at the end).
 
     PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py                    # full check, needs a GPU
     PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py --no-forward       # no GPU needed: versions, imports, configs
@@ -20,6 +20,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 RESULTS = []  # (status, name, detail)
 EVAL_CONFIGS = ("configs/forainetv2/pointttt-forainetv2-eval.py", "configs/hoi4d/pointttt-hoi4d-eval.py")
+
+
+def all_configs():
+    """Every config under configs/ except the _base_ files, as paths relative to the repository."""
+    out = []
+    for d in sorted(os.listdir(os.path.join(REPO, "configs"))):
+        if d.startswith("_") or not os.path.isdir(os.path.join(REPO, "configs", d)):
+            continue
+        out += [f"configs/{d}/{f}" for f in sorted(os.listdir(os.path.join(REPO, "configs", d))) if f.endswith(".py")]
+    return out
 
 
 def check(name):
@@ -90,7 +100,7 @@ def t_packages():
     return ", ".join(out)
 
 
-@check("pointcept import chain, registries, evaluation configs")
+@check("pointcept import chain, registries, all configs")
 def t_pointcept():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -99,17 +109,21 @@ def t_pointcept():
         from pointcept.engines.hooks.builder import HOOKS
         from pointcept.models.builder import MODELS
         from pointcept.datasets.builder import DATASETS
-    need = {TRAINERS: ["DefaultTrainer"], HOOKS: ["CheckpointLoader", "SemSegEvaluator"],
-            MODELS: ["PT-v3m1", "PT-v3-LaCT-Dec", "PT-v3-LaCT-Temporal", "StreamingSegmentorV2"],
+    need = {TRAINERS: ["DefaultTrainer"],
+            HOOKS: ["CheckpointLoader", "SemSegEvaluator", "IterationTimer", "InformationWriter", "CheckpointSaver"],
+            MODELS: ["PT-v3m1", "PT-v3-LaCT-Dec", "PT-v3-LaCT-Temporal", "StreamingSegmentorV2", "DefaultSegmentorV2"],
             DATASETS: ["ForAINetV2Dataset", "HOI4DDataset"]}
     miss = [k for reg, keys in need.items() for k in keys if k not in reg.module_dict]
     assert not miss, f"not registered: {miss}"
     done = []
-    for rel in EVAL_CONFIGS:
+    for rel in all_configs():
         with tempfile.TemporaryDirectory(prefix="smoke_cfg_") as td:
             cfg = default_config_parser(os.path.join(REPO, rel), dict(save_path=td))
-        done.append(f"{os.path.basename(rel)}: {cfg.model.backbone.type}")
-    return " | ".join(done)
+        hooks = [h["type"] for h in cfg.hooks if h["type"] not in HOOKS.module_dict]
+        assert not hooks, f"{rel}: hooks not registered: {hooks}"
+        assert cfg.model.backbone.type in MODELS.module_dict, f"{rel}: unknown backbone"
+        done.append(f"{os.path.basename(rel)[:-3]}")
+    return f"{len(done)} configs parse: " + ", ".join(done)
 
 
 @check("spconv sparse convolution on GPU (default algorithm and Native)")

@@ -4,7 +4,7 @@ Whole plots, 0.05 m voxels, chunk-wise inference (102,400 voxels per chunk), pre
 back to every raw point by nearest neighbour, IoU accumulated over all plots, no test-time
 augmentation, 1 GPU.
 
-    bash scripts/eval_forest.sh [path/to/pointttt_forainetv2.pth]
+    bash scripts/test.sh -d forainetv2 [-w path/to/pointttt_forainetv2.pth]
 """
 
 # runtime

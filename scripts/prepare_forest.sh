@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-# Download the FOR-instanceV2 test split from Zenodo (record 16742708, test_data.zip: 377 MB, 1.4 GB unpacked)
-# and lay it out the way pointcept/datasets/forainetv2.py expects:
+# Download FOR-instanceV2 from Zenodo (record 16742708) and lay it out the way
+# pointcept/datasets/forainetv2.py expects:
 #
-#   data/forainetv2/test_data/*.ply
-#   data/forainetv2/meta_data/test_list.txt      (the official 28-plot test list)
+#   data/forainetv2/test_data/*.ply              test_data.zip: 377 MB, 1.4 GB unpacked
+#   data/forainetv2/train_val_data/*.ply         train_val_data.zip: 2.4 GB, 11 GB unpacked (only with --train)
+#   data/forainetv2/meta_data/{train,val,test}_list.txt   the official split lists (47 / 16 / 28 plots)
 #
-#   bash scripts/prepare_forest.sh                              # into data/forainetv2
+#   bash scripts/prepare_forest.sh                              # test split only (evaluation), into data/forainetv2
+#   bash scripts/prepare_forest.sh --train                      # also the training and validation plots
 #   DATA_ROOT=/data/forainetv2 bash scripts/prepare_forest.sh    # elsewhere; then pass the same DATA_ROOT to
-#                                                                # scripts/eval_forest.sh (or link it to data/forainetv2)
+#                                                                # scripts/test.sh and scripts/train.sh
+#                                                                # (or link it to data/forainetv2)
 #
+# The three BlueCat_RN_merged_trees_* plots of the archives are in none of the lists (neither trained on
+# nor evaluated).
 # Needs curl, md5sum and unzip (or python). Can be run again at any time: finished steps are skipped, an
 # interrupted download continues from its .part file, an interrupted extraction starts over. The zip is not
 # needed once it is unpacked. Do not start it twice at the same time on the same DATA_ROOT.
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SPLITS="test"
+for a in "$@"; do
+  case "$a" in
+    --train) SPLITS="train val test" ;;
+    *) echo "unknown argument: $a (use --train to get the training and validation plots too)" >&2; exit 2 ;;
+  esac
+done
 case "${DATA_ROOT:-}" in ""|/*) ;; *) DATA_ROOT=$PWD/$DATA_ROOT ;; esac
 ROOT=${DATA_ROOT:-$REPO/data/forainetv2}
 if [ -z "${PYTHON:-}" ]; then
@@ -107,16 +119,19 @@ get() {
   mv "$tmp/$1" "$ROOT/$1"
   rm -rf "$tmp"
 }
+case " $SPLITS " in *" train "*) get train_val_data 5a63cc1cbe88edd9ebec28ad7e46f79b ;; esac
 get test_data 1c00a0f0b89f03b74064432162619136
 
 mkdir -p "$ROOT/meta_data"
-list=$REPO/pointcept/datasets/preprocessing/forainetv2/meta_data/test_list.txt
-cmp -s "$list" "$ROOT/meta_data/test_list.txt" || cp "$list" "$ROOT/meta_data/"
+for split in $SPLITS; do
+  list=$REPO/pointcept/datasets/preprocessing/forainetv2/meta_data/${split}_list.txt
+  cmp -s "$list" "$ROOT/meta_data/${split}_list.txt" || cp "$list" "$ROOT/meta_data/"
+done
 
 # every listed plot must exist and be complete
-"$PYTHON" - "$ROOT" <<'PY'
+"$PYTHON" - "$ROOT" $SPLITS <<'PY'
 import os, sys
-root = sys.argv[1]
+root, splits = sys.argv[1], sys.argv[2:]
 BYTES = dict(char=1, uchar=1, int8=1, uint8=1, short=2, ushort=2, int16=2, uint16=2, int=4, uint=4,
              int32=4, uint32=4, float=4, float32=4, double=8, float64=8)
 
@@ -144,15 +159,21 @@ def truncated(path):
         return True
     return binary and os.path.getsize(path) < size
 
-names = [l.strip() for l in open(os.path.join(root, "meta_data", "test_list.txt")) if l.strip()]
-files = [os.path.join("test_data", n + ".ply") for n in names]
-missing = [p for p in files if not os.path.exists(os.path.join(root, p))]
-short = [p for p in files if p not in missing and truncated(os.path.join(root, p))]
-print(f"test: {len(names)} plots listed (expected 28), {len(missing)} missing, {len(short)} truncated")
-for p in (missing + short)[:5]:
-    print("   missing or truncated:", p)
-if missing or short:
-    print(f"test_data is incomplete: delete {os.path.join(root, 'test_data')} and run this script again")
-sys.exit(0 if len(names) == 28 and not missing and not short else 1)
+ok, redo = True, set()
+for split in splits:
+    sub, expect = {"train": ("train_val_data", 47), "val": ("train_val_data", 16), "test": ("test_data", 28)}[split]
+    names = [l.strip() for l in open(os.path.join(root, "meta_data", f"{split}_list.txt")) if l.strip()]
+    files = [os.path.join(sub, n + ".ply") for n in names]
+    missing = [p for p in files if not os.path.exists(os.path.join(root, p))]
+    short = [p for p in files if p not in missing and truncated(os.path.join(root, p))]
+    print(f"{split:5s}: {len(names)} plots listed (expected {expect}), {len(missing)} missing, {len(short)} truncated")
+    for p in (missing + short)[:5]:
+        print("   missing or truncated:", p)
+    ok &= len(names) == expect and not missing and not short
+    if missing or short:
+        redo.add(sub)
+for sub in sorted(redo):
+    print(f"{sub} is incomplete: delete {os.path.join(root, sub)} and run this script again")
+sys.exit(0 if ok else 1)
 PY
-echo "FOR-instanceV2 test split ready at $ROOT"
+echo "FOR-instanceV2 ($SPLITS) ready at $ROOT"

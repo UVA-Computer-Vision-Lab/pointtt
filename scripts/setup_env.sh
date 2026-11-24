@@ -8,7 +8,7 @@
 #   ENV_PREFIX=$PWD/env-torch2.7 TORCH_VER=2.7.1 bash scripts/setup_env.sh  # Blackwell GPUs (B200, sm_100): torch 2.7.1+cu128
 #   ENV_PREFIX=/data/envs/pointtt bash scripts/setup_env.sh                  # env somewhere else
 #   USE_CONDA_GCC=1 bash scripts/setup_env.sh                                # host without a gcc 9-13
-# The evaluation scripts use ./env/bin/python if it exists; otherwise set PYTHON=<prefix>/bin/python.
+# scripts/train.sh and scripts/test.sh use ./env/bin/python if it exists; otherwise set PYTHON=<prefix>/bin/python.
 # Re-running resumes after the last finished stage (stamp files in $ENV_PREFIX/.setup_stamps).
 # One prefix holds one torch version: build another TORCH_VER into its own ENV_PREFIX.
 # On a node without GPU the build still finishes; the closing smoke test then runs with --no-forward and
@@ -280,7 +280,7 @@ fi
 cat <<EOF
 
 Environment ready:  $PY
-The evaluation scripts use ./env/bin/python if it exists; otherwise run them with PYTHON=$PY
+scripts/train.sh and scripts/test.sh use ./env/bin/python if it exists; otherwise run them with PYTHON=$PY
 EOF
 if [ "$NO_GPU" = 1 ]; then
   cat <<EOF
