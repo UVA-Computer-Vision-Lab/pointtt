@@ -14,17 +14,6 @@ This repository provides the official implementation of PoinTTT from the paper
 [*Recurrent Point Transformer via Test-Time Training*](https://arxiv.org/abs/2611.29059): training and evaluation
 code, configs, and the released checkpoints for FOR-instanceV2 and HOI4D.
 
-If you find this code useful, please consider citing:
-
-```bibtex
-@article{zhou2026pointtt,
-  title   = {Recurrent Point Transformer via Test-Time Training},
-  author  = {Zhou, Wentao and Chen, Xuweiyi and Saunders, Charles and RoyChowdhury, Aruni and Cheng, Zezhou},
-  journal = {arXiv preprint arXiv:2611.29059},
-  year    = {2026}
-}
-```
-
 Environment Setup
 -----------------
 
@@ -197,14 +186,6 @@ FOR-instanceV2 in detail: mAcc 91.9, allAcc 96.0; IoU ground 99.3, wood 69.3, le
 pptr_mIoU is the mean IoU over the classes that occur in the HOI4D test labels, without classes 0 and 1
 (39 classes; the protocol of PPTr), computed by `scripts/pptr_miou.py`.
 
-Acknowledgements
-----------------
-
-This code builds on [Pointcept](https://github.com/Pointcept/Pointcept) and Point Transformer V3, and on
-[LaCT](https://github.com/a1600012888/LaCT) for the fast-weight layers. We thank the authors of
-[FOR-instanceV2 / ForestFormer3D](https://github.com/SmartForest-no/ForestFormer3D), FOR-instance and
-[HOI4D](https://hoi4d.github.io/) for releasing their data.
-
 License
 -------
 
@@ -213,5 +194,25 @@ The code is released under the MIT License (`LICENSE`); third-party code keeps i
 FOR-instanceV2 is released under GPL-3.0-or-later and includes plots of
 [FOR-instance](https://doi.org/10.5281/zenodo.8287792) (CC BY 4.0); HOI4D is released under CC BY-NC 4.0.
 Each checkpoint was trained on the named dataset and is subject to its terms; the HOI4D checkpoint is for
-non-commercial research use only. The FOR-instanceV2 split lists in
-`pointcept/datasets/preprocessing/forainetv2/meta_data/` come from ForestFormer3D (CC BY-NC 4.0).
+non-commercial research use only.
+
+Acknowledgements
+----------------
+
+This code builds on [Pointcept](https://github.com/Pointcept/Pointcept) and Point Transformer V3, and on
+[LaCT](https://github.com/a1600012888/LaCT) for the fast-weight layers. We thank the authors of
+[FOR-instanceV2 / ForestFormer3D](https://github.com/SmartForest-no/ForestFormer3D), FOR-instance and
+[HOI4D](https://hoi4d.github.io/) for releasing their data.
+
+Citation
+--------
+
+```bibtex
+@article{zhou2026recurrent,
+  title   = {Recurrent Point Transformer via Test-Time Training},
+  author  = {Zhou, Wentao and Chen, Xuweiyi and Saunders, Charles and RoyChowdhury, Aruni and Cheng, Zezhou},
+  journal = {arXiv preprint arXiv:2611.29059},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2611.29059}
+}
+```
