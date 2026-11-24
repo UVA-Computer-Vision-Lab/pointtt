@@ -21,13 +21,8 @@ save_path = "exp/hoi4d_eval"
 num_worker = 8  # loader workers in total over all GPUs
 batch_size = 32  # sequences in total over all GPUs, at most 8 per GPU (max_batch_size_per_gpu)
 batch_size_val = 32
-batch_size_test = None
 epoch = 0
 eval_epoch = 1
-sync_bn = False
-enable_amp = True
-empty_cache_per_epoch = False
-find_unused_parameters = False
 ddp_static_graph = True
 hooks = [
     dict(type="CheckpointLoader", strict=True),
@@ -42,16 +37,12 @@ model = dict(
     backbone_out_channels=64,
     backbone=dict(
         type="PT-v3-LaCT-Temporal",
-        chunk_size=10240,
         lact_head_dim=64,
         lact_base_lr=1e-2,
-        lact_use_muon=True,
         lact_enc_stages=[1, 2, 3, 4],
         lact_dec_stages=[0, 1, 2, 3],
-        freeze_backbone=False,
         train_with_ttt=True,
         max_batch_size_per_gpu=8,
-        ttt_online_mode=True,
         ttt_online_view_avg=True,
         ttt_online_extra_views=2,
         in_channels=3,
@@ -72,18 +63,6 @@ model = dict(
         proj_drop=0.0,
         drop_path=0.3,
         shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("HOI4D",),
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),  # only for the logged val loss
@@ -96,7 +75,7 @@ data = dict(
     num_classes=49,
     ignore_index=-1,
     names=[str(i) for i in range(49)],
-    train=dict(),  # not used for evaluation (tools/train.py expects the key)
+    train=dict(),  # not used for evaluation (default_config_parser sets data.train.loop)
     val=dict(
         type="HOI4DDataset",
         sample_unit="sequence",
@@ -122,6 +101,5 @@ data = dict(
                 feat_keys=("coord",),
             ),
         ],
-        test_mode=False,
     ),
 )

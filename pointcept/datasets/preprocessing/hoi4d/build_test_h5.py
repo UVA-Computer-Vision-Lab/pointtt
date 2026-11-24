@@ -33,9 +33,7 @@ def main():
     print('reading', args.test_h5)
     with h5py.File(args.test_h5, 'r') as src:
         pcd = src['pcd']                  # (892, 300, 8192, 3)
-        center = src['center']            # (892, 300, 3)
         print('  pcd', pcd.shape, pcd.dtype)
-        print('  center', center.shape, center.dtype)
 
         print('reading', args.label_npy)
         label = np.load(args.label_npy, mmap_mode='r')    # (892, 300, 8192)
@@ -53,11 +51,8 @@ def main():
             tmp_path = out_path + '.tmp'
             print(f'writing {out_path}: seqs {lo}..{hi}')
             try:
-                # one dataset after the other, each filled before the next is created: this is the
-                # allocation order of create_dataset(data=...), hence the same bytes on disk
                 with h5py.File(tmp_path, 'w') as f:
                     write_rows(f, 'pcd', pcd, lo, hi, lambda i: pcd[i])
-                    write_rows(f, 'center', center, lo, hi, lambda i: center[i])
                     write_rows(f, 'semantic', label, lo, hi, label_row)
             except BaseException:
                 if os.path.exists(tmp_path):

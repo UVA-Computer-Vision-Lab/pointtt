@@ -11,13 +11,11 @@
 #   -g GPUS     forainetv2: 1. hoi4d: 1, 2 or 4, must divide the 892 test sequences (default: 4, 2 or 1,
 #               the most the visible GPUs allow; the reported number was measured with 4)
 #   -n DIR      output directory (default: exp/DATASET_eval); the full log is DIR/train.log
-#   -p PYTHON   interpreter of the environment (default: ./env/bin/python if it exists, else python)
 #   -o "K=V .." extra config overrides
-# Environment variables (all optional): PYTHON, DATA_ROOT (directory with the test data, default
+# Environment variables (all optional): PYTHON (interpreter of the environment, default
+# ./env/bin/python if it exists, else python), DATA_ROOT (directory with the test data, default
 # data/DATASET), CUDA_VISIBLE_DEVICES; for hoi4d also SEQ_PER_GPU (sequences per GPU and batch, 1-8,
-# default 8; the batch buffers alone take about 18 GB of GPU memory, use 2-4 on 24-40 GB GPUs) and
-# NUM_WORKER (loader workers in total, default 2 per GPU; each holds about 3 GB of prefetched data).
-# NUM_GPUS and OUT are accepted in place of -g and -n. DRY_RUN=1 prints the command instead of running it.
+# default 8; the batch buffers alone take about 18 GB of GPU memory, use 2-4 on 24-40 GB GPUs).
 #
 # Expected on NVIDIA B200 (torch 2.7.1+cu128):
 #   forainetv2, 1 GPU, a few minutes:
@@ -44,15 +42,14 @@ check_gpus() {  # check_gpus N HINT
   fi
 }
 
-DATASET="" CONFIG="" CKPT="" NGPU=${NUM_GPUS:-} OUT=${OUT:-} EXTRA=""
-while getopts "d:c:w:g:n:p:o:h" opt; do
+DATASET="" CONFIG="" CKPT="" NGPU="" OUT="" EXTRA=""
+while getopts "d:c:w:g:n:o:h" opt; do
   case $opt in
     d) DATASET=$OPTARG ;;
     c) CONFIG=$OPTARG ;;
     w) CKPT=$OPTARG ;;
     g) NGPU=$OPTARG ;;
     n) OUT=$OPTARG ;;
-    p) PYTHON=$OPTARG ;;
     o) EXTRA=$OPTARG ;;
     h) usage 0 ;;
     *) usage ;;
@@ -107,10 +104,9 @@ else
     if [ "$VIS" -ge 4 ]; then NGPU=4; elif [ "$VIS" -ge 2 ]; then NGPU=2; else NGPU=1; fi
   fi
   SEQ_PER_GPU=${SEQ_PER_GPU:-8}
-  NUM_WORKER=${NUM_WORKER:-$((2 * NGPU))}
+  NUM_WORKER=$((2 * NGPU))
   case "$NGPU" in 1|2|4) ;; *) echo "-g $NGPU: use 1, 2 or 4 (must divide the 892 test sequences)" >&2; exit 2 ;; esac
   case "$SEQ_PER_GPU" in [1-8]) ;; *) echo "SEQ_PER_GPU=$SEQ_PER_GPU: use 1-8" >&2; exit 2 ;; esac
-  case "$NUM_WORKER" in ''|*[!0-9]*) echo "NUM_WORKER=$NUM_WORKER is not a number" >&2; exit 2 ;; esac
   for f in test1_right test2_right; do
     [ -s "$DATA_ROOT/$f.h5" ] || { echo "missing $DATA_ROOT/$f.h5 (see README, Datasets)" >&2; exit 1; }
   done
@@ -122,10 +118,6 @@ else
 fi
 
 CMD=("$PYTHON" tools/test.py --config-file "configs/$DATASET/$CONFIG.py" --num-gpus "$NGPU" --options $OPTS $EXTRA)
-if [ "${DRY_RUN:-0}" = 1 ]; then
-  echo "cd $REPO && ${CMD[*]}"
-  exit 0
-fi
 check_gpus "$NGPU" ""
 cd "$REPO"
 ulimit -n 65536 2>/dev/null || true
@@ -135,5 +127,5 @@ echo
 if [ "$DATASET" = forainetv2 ]; then
   grep -E "Val result|Class_[0-9]+-" "$OUT/train.log" | tail -4 | sed -E 's/^\[[^]]*\] //'
 else
-  "$PYTHON" scripts/pptr_miou.py "$OUT/train.log" --latest
+  "$PYTHON" scripts/pptr_miou.py "$OUT/train.log"
 fi

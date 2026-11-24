@@ -12,8 +12,6 @@ from pointcept.utils.registry import Registry
 OPTIMIZERS = Registry("optimizers")
 
 
-OPTIMIZERS.register_module(module=torch.optim.SGD, name="SGD")
-OPTIMIZERS.register_module(module=torch.optim.Adam, name="Adam")
 OPTIMIZERS.register_module(module=torch.optim.AdamW, name="AdamW")
 
 
@@ -23,14 +21,7 @@ def build_optimizer(cfg, model, param_dicts=None):
     else:
         cfg.params = [dict(names=[], params=[], lr=cfg.lr)]
         for i in range(len(param_dicts)):
-            param_group = dict(names=[], params=[])
-            if "lr" in param_dicts[i].keys():
-                param_group["lr"] = param_dicts[i].lr
-            if "momentum" in param_dicts[i].keys():
-                param_group["momentum"] = param_dicts[i].momentum
-            if "weight_decay" in param_dicts[i].keys():
-                param_group["weight_decay"] = param_dicts[i].weight_decay
-            cfg.params.append(param_group)
+            cfg.params.append(dict(names=[], params=[], lr=param_dicts[i].lr))
 
         for n, p in model.named_parameters():
             flag = False

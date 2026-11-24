@@ -7,21 +7,18 @@ Please cite our work if the code is helpful to you.
 Modified for PoinTTT: the checkpoint saver keeps every epoch's checkpoint by default
 (`save_every_epoch = False` keeps every `save_freq`-th one), writes checkpoints atomically and
 stores the best metric as a Python float; the checkpoint loader uses
-torch.load(weights_only=True), also for resuming (numpy scalars are allowed: older checkpoints
-store the best metric as one), and fails on a missing weight file.
+torch.load(weights_only=True), also for resuming, and fails on a missing weight file; no
+TensorBoard logging.
 """
 
 import os
 import time
-import contextlib
 from collections import OrderedDict
 
-import numpy as np
 import torch
 
 import pointcept.utils.comm as comm
 from pointcept.utils.comm import is_main_process
-from pointcept.utils.timer import Timer
 
 from .default import HookBase
 from .builder import HOOKS
@@ -31,24 +28,22 @@ from .builder import HOOKS
 class IterationTimer(HookBase):
     def __init__(self, warmup_iter=1):
         self._warmup_iter = warmup_iter
-        self._start_time = time.perf_counter()
-        self._iter_timer = Timer()
+        self._last_time = time.perf_counter()
         self._remain_iter = 0
 
     def before_train(self):
-        self._start_time = time.perf_counter()
         self._remain_iter = self.trainer.max_epoch * len(self.trainer.train_loader)
 
     def before_epoch(self):
-        self._iter_timer.reset()
+        self._last_time = time.perf_counter()
 
     def before_step(self):
-        data_time = self._iter_timer.seconds()
+        data_time = time.perf_counter() - self._last_time
         self.trainer.storage.put_scalar("data_time", data_time)
 
     def after_step(self):
-        batch_time = self._iter_timer.seconds()
-        self._iter_timer.reset()
+        batch_time = time.perf_counter() - self._last_time
+        self._last_time = time.perf_counter()
         self.trainer.storage.put_scalar("batch_time", batch_time)
         self._remain_iter -= 1
         remain_time = self._remain_iter * self.trainer.storage.history("batch_time").avg
@@ -76,15 +71,12 @@ class IterationTimer(HookBase):
 @HOOKS.register_module()
 class InformationWriter(HookBase):
     def __init__(self):
-        self.curr_iter = 0
         self.model_output_keys = []
 
     def before_train(self):
         self.trainer.comm_info["iter_info"] = ""
-        self.curr_iter = self.trainer.start_epoch * len(self.trainer.train_loader)
 
     def before_step(self):
-        self.curr_iter += 1
         info = "Train: [{epoch}/{max_epoch}][{iter}/{max_iter}] ".format(
             epoch=self.trainer.epoch + 1,
             max_epoch=self.trainer.max_epoch,
@@ -108,14 +100,6 @@ class InformationWriter(HookBase):
         self.trainer.comm_info["iter_info"] += "Lr: {lr:.5f}".format(lr=lr)
         self.trainer.logger.info(self.trainer.comm_info["iter_info"])
         self.trainer.comm_info["iter_info"] = ""  # reset iter info
-        if self.trainer.writer is not None:
-            self.trainer.writer.add_scalar("lr", lr, self.curr_iter)
-            for key in self.model_output_keys:
-                self.trainer.writer.add_scalar(
-                    "train_batch/" + key,
-                    self.trainer.storage.history(key).val,
-                    self.curr_iter,
-                )
 
     def after_epoch(self):
         epoch_info = "Train result: "
@@ -124,13 +108,6 @@ class InformationWriter(HookBase):
                 key=key, value=self.trainer.storage.history(key).avg
             )
         self.trainer.logger.info(epoch_info)
-        if self.trainer.writer is not None:
-            for key in self.model_output_keys:
-                self.trainer.writer.add_scalar(
-                    "train/" + key,
-                    self.trainer.storage.history(key).avg,
-                    self.trainer.epoch + 1,
-                )
 
 
 def _atomic_copy(src, dst):
@@ -153,39 +130,30 @@ class CheckpointSaver(HookBase):
     epochs; model_last.pth and model_best.pth are always written.
     """
 
-    def __init__(self, save_freq=None):
+    def __init__(self, save_freq):
         self.save_freq = save_freq
 
     def after_epoch(self):
         if is_main_process():
             is_best = False
             if self.trainer.cfg.evaluate:
-                if (
-                    "current_metric_value" in self.trainer.comm_info
-                    and "current_metric_name" in self.trainer.comm_info
-                ):
-                    current_metric_value = float(
-                        self.trainer.comm_info["current_metric_value"]
-                    )
-                    current_metric_name = self.trainer.comm_info["current_metric_name"]
+                # set by SemSegEvaluator, which runs before this hook
+                current_metric_value = float(self.trainer.comm_info["current_metric_value"])
+                current_metric_name = self.trainer.comm_info["current_metric_name"]
 
-                    if current_metric_value > self.trainer.best_metric_value:
-                        self.trainer.best_metric_value = current_metric_value
-                        is_best = True
-                        self.trainer.logger.info(
-                            "Best validation {} updated to: {:.4f}".format(
-                                current_metric_name, current_metric_value
-                            )
-                        )
+                if current_metric_value > self.trainer.best_metric_value:
+                    self.trainer.best_metric_value = current_metric_value
+                    is_best = True
                     self.trainer.logger.info(
-                        "Currently Best {}: {:.4f}".format(
-                            current_metric_name, self.trainer.best_metric_value
+                        "Best validation {} updated to: {:.4f}".format(
+                            current_metric_name, current_metric_value
                         )
                     )
-                else:
-                    self.trainer.logger.warning(
-                        "current_metric_value or current_metric_name not found in comm_info."
+                self.trainer.logger.info(
+                    "Currently Best {}: {:.4f}".format(
+                        current_metric_name, self.trainer.best_metric_value
                     )
+                )
 
             epoch_filename = os.path.join(
                 self.trainer.cfg.save_path, "model", f"epoch_{self.trainer.epoch + 1}.pth"
@@ -193,7 +161,6 @@ class CheckpointSaver(HookBase):
             last_filename = os.path.join(self.trainer.cfg.save_path, "model", "model_last.pth")
             keep_epoch = (
                 getattr(self.trainer.cfg, "save_every_epoch", True)
-                or not self.save_freq
                 or (self.trainer.epoch + 1) % self.save_freq == 0
             )
             if not keep_epoch:
@@ -224,54 +191,28 @@ class CheckpointSaver(HookBase):
                 )
 
 
-def _numpy_safe_globals():
-    """numpy types a weights-only torch.load has to accept: checkpoints written before the best
-    metric was saved as a Python float hold it as a numpy.float64 scalar."""
-    try:
-        from numpy._core.multiarray import scalar  # numpy >= 2
-    except ImportError:
-        from numpy.core.multiarray import scalar  # numpy < 2
-    dtypes = [type(np.dtype(t)) for t in (np.float64, np.float32, np.int64, np.int32, np.bool_)]
-    return [scalar, np.dtype, *dtypes]
-
-
 @HOOKS.register_module()
 class CheckpointLoader(HookBase):
-    def __init__(self, keywords="", replacement=None, strict=False):
-        self.keywords = keywords
-        self.replacement = replacement if replacement is not None else keywords
+    def __init__(self, strict=False):
         self.strict = strict
 
     def before_train(self):
         self.trainer.logger.info("=> Loading checkpoint & weight ...")
         if self.trainer.cfg.weight and os.path.isfile(self.trainer.cfg.weight):
             self.trainer.logger.info(f"Loading weight at: {self.trainer.cfg.weight}")
-            # Checkpoints hold tensors and plain Python / numpy values only (training
-            # checkpoints also the optimizer, scheduler and AMP-scaler states), so nothing
-            # else needs to be unpickled.
-            safe_globals = getattr(torch.serialization, "safe_globals", None)
-            ctx = (
-                safe_globals(_numpy_safe_globals())
-                if safe_globals is not None
-                else contextlib.nullcontext()
-            )
-            with ctx:
-                checkpoint = torch.load(
-                    self.trainer.cfg.weight,
-                    map_location=lambda storage, loc: storage.cuda(),
-                    weights_only=True,
-                )
-            self.trainer.logger.info(
-                f"Loading layer weights with keyword: {self.keywords}, "
-                f"replace keyword with: {self.replacement}"
+            # Checkpoints hold tensors and plain Python values only (training checkpoints
+            # also the optimizer, scheduler and AMP-scaler states), so nothing else needs
+            # to be unpickled.
+            checkpoint = torch.load(
+                self.trainer.cfg.weight,
+                map_location=lambda storage, loc: storage.cuda(),
+                weights_only=True,
             )
             weight = OrderedDict()
             for key, value in checkpoint["state_dict"].items():
                 if not key.startswith("module."):
                     key = "module." + key  # xxx.xxx -> module.xxx.xxx
                 # Now all keys contain "module." no matter DDP or not.
-                if self.keywords in key:
-                    key = key.replace(self.keywords, self.replacement)
                 if comm.get_world_size() == 1:
                     key = key[7:]  # module.xxx.xxx -> xxx.xxx
                 weight[key] = value

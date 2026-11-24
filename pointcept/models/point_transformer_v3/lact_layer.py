@@ -5,15 +5,14 @@ PT-v3-LaCT-Dec and PT-v3-LaCT-Temporal.
 Copied from LaCT (https://github.com/a1600012888/LaCT),
 minimal_implementations/causal_lact_with_sliding_window_attn.py,
 Copyright (c) 2025 Tianyuan Zhang, Hao Tan, MIT License (see THIRD_PARTY_NOTICES.md).
-Modified for PoinTTT: only l2_norm, zeropower_via_newtonschulz5 and inv_softplus are kept,
-without torch.compile.
+Modified for PoinTTT: only l2_norm, zeropower_via_newtonschulz5 and inv_softplus (for a
+Python float) are kept, without torch.compile.
 """
 
 import math
 import torch
 
 
-#@torch.compile()
 def l2_norm(x: torch.Tensor):
     """
     x: [b, l, d]
@@ -23,7 +22,6 @@ def l2_norm(x: torch.Tensor):
     return ret.type(x_type)
 
 
-#@torch.compile()
 def zeropower_via_newtonschulz5(G):
     """
     This is an updated version of the zeropower_via_newtonschulz5 function in here:
@@ -32,15 +30,13 @@ def zeropower_via_newtonschulz5(G):
     Major change: G is [b, d, d] rather than [d, d]
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G.
     Args:
-        G: [b, d, d']
+        G: [b, d, d] (square: the fast weights are head_dim x head_dim)
     Returns:
-        X: [b, d, d']
-    FLOPS:  When d=d', Total FLOPS=30 * b * d^3
+        X: [b, d, d]
+    FLOPS: 30 * b * d^3
     """
     assert len(G.shape) == 3
     X = G.bfloat16()
-    if G.size(1) > G.size(2):
-        X = X.transpose(1, 2)
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(1, 2), keepdim=True) + 1e-7)
     # Perform the NS iterations
@@ -57,14 +53,8 @@ def zeropower_via_newtonschulz5(G):
         )  # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
-    if G.size(1) > G.size(2):
-        X = X.transpose(1, 2)
     return X
 
 
 def inv_softplus(x):
-    if isinstance(x, torch.Tensor):
-        y = x + torch.log(-torch.expm1(-x))
-    else:
-        y = x + math.log(-math.expm1(-x))
-    return y
+    return x + math.log(-math.expm1(-x))

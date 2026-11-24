@@ -2,38 +2,19 @@
 Logger Utils
 
 Modified from mmcv
+Modified for PoinTTT: plain (uncoloured) output only; print_log and _log_api_usage removed.
 
 Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 """
 
 import logging
-import torch
 import torch.distributed as dist
 
-from termcolor import colored
-
 logger_initialized = {}
-root_status = 0
 
 
-class _ColorfulFormatter(logging.Formatter):
-    def __init__(self, *args, **kwargs):
-        self._root_name = kwargs.pop("root_name") + "."
-        super(_ColorfulFormatter, self).__init__(*args, **kwargs)
-
-    def formatMessage(self, record):
-        log = super(_ColorfulFormatter, self).formatMessage(record)
-        if record.levelno == logging.WARNING:
-            prefix = colored("WARNING", "red", attrs=["blink"])
-        elif record.levelno == logging.ERROR or record.levelno == logging.CRITICAL:
-            prefix = colored("ERROR", "red", attrs=["blink", "underline"])
-        else:
-            return log
-        return prefix + " " + log
-
-
-def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a", color=False):
+def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a"):
     """Initialize and get a logger by name.
 
     If the logger has not been initialized, this method will initialize the
@@ -51,7 +32,6 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a", color
             "Error" thus be silent most of the time.
         file_mode (str): The file mode used in opening log file.
             Defaults to 'a'.
-        color (bool): Colorful log output. Defaults to True
 
     Returns:
         logging.Logger: The expected logger.
@@ -60,12 +40,6 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a", color
 
     if name in logger_initialized:
         return logger
-    # handle hierarchical names
-    # e.g., logger "a" is initialized, then logger "a.b" will skip the
-    # initialization since it is a child of "a".
-    for logger_name in logger_initialized:
-        if name.startswith(logger_name):
-            return logger
 
     logger.propagate = False
 
@@ -85,17 +59,9 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a", color
         file_handler = logging.FileHandler(log_file, file_mode)
         handlers.append(file_handler)
 
-    plain_formatter = logging.Formatter(
+    formatter = logging.Formatter(
         "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
     )
-    if color:
-        formatter = _ColorfulFormatter(
-            colored("[%(asctime)s %(name)s]: ", "green") + "%(message)s",
-            datefmt="%m/%d %H:%M:%S",
-            root_name=name,
-        )
-    else:
-        formatter = plain_formatter
     for handler in handlers:
         handler.setFormatter(formatter)
         handler.setLevel(log_level)
@@ -109,35 +75,6 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="a", color
     logger_initialized[name] = True
 
     return logger
-
-
-def print_log(msg, logger=None, level=logging.INFO):
-    """Print a log message.
-
-    Args:
-        msg (str): The message to be logged.
-        logger (logging.Logger | str | None): The logger to be used.
-            Some special loggers are:
-            - "silent": no message will be printed.
-            - other str: the logger obtained with `get_root_logger(logger)`.
-            - None: The `print()` method will be used to print log messages.
-        level (int): Logging level. Only available when `logger` is a Logger
-            object or "root".
-    """
-    if logger is None:
-        print(msg)
-    elif isinstance(logger, logging.Logger):
-        logger.log(level, msg)
-    elif logger == "silent":
-        pass
-    elif isinstance(logger, str):
-        _logger = get_logger(logger)
-        _logger.log(level, msg)
-    else:
-        raise TypeError(
-            "logger should be either a logging.Logger object, str, "
-            f'"silent" or None, but got {type(logger)}'
-        )
 
 
 def get_root_logger(log_file=None, log_level=logging.INFO, file_mode="a"):
@@ -162,11 +99,3 @@ def get_root_logger(log_file=None, log_level=logging.INFO, file_mode="a"):
         name="pointcept", log_file=log_file, log_level=log_level, file_mode=file_mode
     )
     return logger
-
-
-def _log_api_usage(identifier: str):
-    """
-    Internal function used to log the usage of different detectron2 components
-    inside facebook's infra.
-    """
-    torch._C._log_api_usage_once("pointcept." + identifier)

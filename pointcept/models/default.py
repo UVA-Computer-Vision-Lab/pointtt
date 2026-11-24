@@ -8,43 +8,21 @@ from .builder import MODELS, build_model
 
 @MODELS.register_module()
 class DefaultSegmentorV2(nn.Module):
-    def __init__(
-        self,
-        num_classes,
-        backbone_out_channels,
-        backbone=None,
-        criteria=None,
-    ):
+    """Segmentor of the HOI4D stage-1 PTv3 (PT-v3m1 on independent clips), used for training
+    only: one forward over the batch, the linear segmentation head and the training loss."""
+
+    def __init__(self, num_classes, backbone_out_channels, backbone, criteria):
         super().__init__()
-        self.seg_head = (
-            nn.Linear(backbone_out_channels, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
+        self.seg_head = nn.Linear(backbone_out_channels, num_classes)
         self.backbone = build_model(backbone)
         self.criteria = build_criteria(criteria)
 
     def forward(self, input_dict):
         point = Point(input_dict)
         point = self.backbone(point)
-        # Backbone added after v1.5.0 return Point instead of feat and use DefaultSegmentorV2
-        # TODO: remove this part after make all backbone return Point only.
-        if isinstance(point, Point):
-            feat = point.feat
-        else:
-            feat = point
-        seg_logits = self.seg_head(feat)
-        # train
-        if self.training:
-            loss = self.criteria(seg_logits, input_dict["segment"])
-            return dict(loss=loss)
-        # eval
-        elif "segment" in input_dict.keys():
-            loss = self.criteria(seg_logits, input_dict["segment"])
-            return dict(loss=loss, seg_logits=seg_logits)
-        # test
-        else:
-            return dict(seg_logits=seg_logits)
+        seg_logits = self.seg_head(point.feat)
+        loss = self.criteria(seg_logits, input_dict["segment"])
+        return dict(loss=loss)
 
 
 @MODELS.register_module()
@@ -58,13 +36,9 @@ class StreamingSegmentorV2(nn.Module):
     Evaluation: one forward over the whole sample, then the linear segmentation head.
     """
 
-    def __init__(self, num_classes, backbone_out_channels, backbone=None, criteria=None):
+    def __init__(self, num_classes, backbone_out_channels, backbone, criteria):
         super().__init__()
-        self.seg_head = (
-            nn.Linear(backbone_out_channels, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
+        self.seg_head = nn.Linear(backbone_out_channels, num_classes)
         self.backbone = build_model(backbone)
         self.criteria = build_criteria(criteria)
 
@@ -81,9 +55,6 @@ class StreamingSegmentorV2(nn.Module):
             return dict(loss=loss)
         else:
             point = self.backbone(input_dict)
-            feat = point.feat if isinstance(point, Point) else point
-            seg_logits = self.seg_head(feat)
-            if "segment" in input_dict.keys():
-                loss = self.criteria(seg_logits, input_dict["segment"])
-                return dict(loss=loss, seg_logits=seg_logits)
-            return dict(seg_logits=seg_logits)
+            seg_logits = self.seg_head(point.feat)
+            loss = self.criteria(seg_logits, input_dict["segment"])
+            return dict(loss=loss, seg_logits=seg_logits)

@@ -4,10 +4,10 @@
 #
 #   data/forainetv2/test_data/*.ply              test_data.zip: 377 MB, 1.4 GB unpacked
 #   data/forainetv2/train_val_data/*.ply         train_val_data.zip: 2.4 GB, 11 GB unpacked (only with --train)
-#   data/forainetv2/meta_data/{train,val,test}_list.txt   the official split lists (47 / 16 / 28 plots)
+#   data/forainetv2/meta_data/{train,test}_list.txt   the official split lists (47 / 28 plots)
 #
 #   bash scripts/prepare_forest.sh                              # test split only (evaluation), into data/forainetv2
-#   bash scripts/prepare_forest.sh --train                      # also the training and validation plots
+#   bash scripts/prepare_forest.sh --train                      # also the training plots
 #   DATA_ROOT=/data/forainetv2 bash scripts/prepare_forest.sh    # elsewhere; then pass the same DATA_ROOT to
 #                                                                # scripts/test.sh and scripts/train.sh
 #                                                                # (or link it to data/forainetv2)
@@ -22,8 +22,8 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SPLITS="test"
 for a in "$@"; do
   case "$a" in
-    --train) SPLITS="train val test" ;;
-    *) echo "unknown argument: $a (use --train to get the training and validation plots too)" >&2; exit 2 ;;
+    --train) SPLITS="train test" ;;
+    *) echo "unknown argument: $a (use --train to get the training plots too)" >&2; exit 2 ;;
   esac
 done
 case "${DATA_ROOT:-}" in ""|/*) ;; *) DATA_ROOT=$PWD/$DATA_ROOT ;; esac
@@ -161,7 +161,7 @@ def truncated(path):
 
 ok, redo = True, set()
 for split in splits:
-    sub, expect = {"train": ("train_val_data", 47), "val": ("train_val_data", 16), "test": ("test_data", 28)}[split]
+    sub, expect = {"train": ("train_val_data", 47), "test": ("test_data", 28)}[split]
     names = [l.strip() for l in open(os.path.join(root, "meta_data", f"{split}_list.txt")) if l.strip()]
     files = [os.path.join(sub, n + ".ply") for n in names]
     missing = [p for p in files if not os.path.exists(os.path.join(root, p))]

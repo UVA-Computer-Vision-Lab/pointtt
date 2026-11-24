@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute the HOI4D pptr_mIoU from the evaluation log (train.log) of tools/train.py.
+"""Compute the HOI4D pptr_mIoU from the evaluation log (train.log) of tools/test.py.
 
 Pointcept's `SemSegEvaluator` reports a flat `np.mean(iou_class)` over all
 classes (including ones that have no ground truth — those just show up as
@@ -11,8 +11,8 @@ The log doesn't print raw `total_class[c]`, but a class with no GT will
 always have `iou=0.0000 AND accuracy=0.0000`. We use that as the proxy; on the
 HOI4D test set it keeps exactly the 39 classes that have ground truth.
 
-Usage:
-    python scripts/pptr_miou.py path/to/train.log [--latest] [--show-skipped]
+Usage (scripts/test.sh runs it):
+    python scripts/pptr_miou.py path/to/train.log
 """
 from __future__ import annotations
 
@@ -75,11 +75,6 @@ def pptr_miou(classes):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("log", help="path to the evaluation log (train.log)")
-    ap.add_argument("--show-skipped", action="store_true",
-                    help="also print which classes were skipped per block")
-    ap.add_argument("--latest", action="store_true",
-                    help="print just the most recent block in a single-line "
-                         "format suitable for tail/grep (used by scripts/test.sh)")
     args = ap.parse_args()
 
     with open(args.log) as f:
@@ -90,29 +85,18 @@ def main():
         print(f"no Val result blocks found in {args.log}", file=sys.stderr)
         sys.exit(1)
 
-    if args.latest:
-        ts, (raw_miou, raw_macc, raw_allacc), classes = blocks[-1]
-        miou_p, active = pptr_miou(classes)
-        print(
-            f"[pptr_score] block={len(blocks)} ts={ts} "
-            f"raw_mIoU={raw_miou:.4f} pptr_mIoU={miou_p:.4f} "
-            f"active_classes={len(active)} raw_mAcc={raw_macc:.4f} "
-            f"raw_allAcc={raw_allacc:.4f}"
-        )
-        if len(active) != 39:
-            print(f"WARNING: {len(active)} active classes, the HOI4D test labels have 39; "
-                  "a class without any correct prediction may have been dropped", file=sys.stderr)
-        return
-
-    print(f"file: {args.log}")
-    print(f"{'#':>3} {'timestamp':>19}  {'raw_mIoU':>9}  {'pptr_mIoU':>10}  {'active':>7}  {'raw_mAcc':>9}  {'raw_allAcc':>10}")
-    for i, (ts, (raw_miou, raw_macc, raw_allacc), classes) in enumerate(blocks, 1):
-        miou_p, active = pptr_miou(classes)
-        print(f"{i:>3} {ts:>19}  {raw_miou:>9.4f}  {miou_p:>10.4f}  {len(active):>7}  {raw_macc:>9.4f}  {raw_allacc:>10.4f}")
-        if args.show_skipped:
-            skipped = [c for c, iou, acc in classes
-                       if c in SKIPLIST or (iou == 0 and acc == 0)]
-            print(f"     skipped classes: {skipped}")
+    # the most recent block, in a single line
+    ts, (raw_miou, raw_macc, raw_allacc), classes = blocks[-1]
+    miou_p, active = pptr_miou(classes)
+    print(
+        f"[pptr_score] block={len(blocks)} ts={ts} "
+        f"raw_mIoU={raw_miou:.4f} pptr_mIoU={miou_p:.4f} "
+        f"active_classes={len(active)} raw_mAcc={raw_macc:.4f} "
+        f"raw_allAcc={raw_allacc:.4f}"
+    )
+    if len(active) != 39:
+        print(f"WARNING: {len(active)} active classes, the HOI4D test labels have 39; "
+              "a class without any correct prediction may have been dropped", file=sys.stderr)
 
 
 if __name__ == "__main__":

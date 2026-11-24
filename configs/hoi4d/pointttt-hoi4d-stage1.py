@@ -34,7 +34,6 @@ batch_size = 64  # clips in total over all GPUs
 epoch = 50
 eval_epoch = 50
 evaluate = False
-clip_grad = None
 enable_amp = True
 empty_cache = False
 mix_prob = 0.0
@@ -72,18 +71,6 @@ model = dict(
         proj_drop=0.0,
         drop_path=0.3,
         shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("HOI4D",),
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
@@ -105,9 +92,6 @@ scheduler = dict(
 # data
 data_root = "data/hoi4d"  # train2.h5, train3.h5, train4.h5 (see README)
 data = dict(
-    num_classes=49,
-    ignore_index=-1,
-    names=[str(i) for i in range(49)],
     train=dict(
         type="HOI4DDataset",
         split="train",  # train2-4.h5; sample_unit "clip" (default): 100 clips per sequence
@@ -132,26 +116,5 @@ data = dict(
             dict(type="ToTensor"),
             dict(type="Collect", keys=("coord", "grid_coord", "segment"), feat_keys=("coord",)),
         ],
-        test_mode=False,
-    ),
-    val=dict(  # clip-level scoring on the test files; not used during training (evaluate = False)
-        type="HOI4DDataset",
-        split="val",
-        data_root=data_root,
-        transform=[
-            dict(type="CenterShift", apply_z=True),
-            dict(
-                type="GridSample",
-                grid_size=0.02,
-                hash_type="fnv",
-                mode="train",
-                keys=("coord", "segment"),
-                return_grid_coord=True,
-            ),
-            dict(type="CenterShift", apply_z=False),
-            dict(type="ToTensor"),
-            dict(type="Collect", keys=("coord", "grid_coord", "segment"), feat_keys=("coord",)),
-        ],
-        test_mode=False,
     ),
 )

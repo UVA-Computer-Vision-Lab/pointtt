@@ -14,13 +14,11 @@
 #   -n EXP      experiment directory (default: exp/DATASET/CONFIG)
 #   -w FILE     initial weights (stage 2: the stage-1 checkpoint)
 #   -r true     resume EXP: its config.py, code/ and model/model_last.pth (-d, -c, -w not needed)
-#   -e NAME     experiment name (only used by the optional W&B logging, enable_wandb=True)
-#   -p PYTHON   interpreter of the environment (default: ./env/bin/python if it exists, else python)
 #   -o "K=V .." extra config overrides, e.g. -o "epoch=2 eval_epoch=2"
-# Environment variables (all optional): PYTHON; DATA_ROOT (data directory, default data/DATASET);
+# Environment variables (all optional): PYTHON (interpreter of the environment, default
+# ./env/bin/python if it exists, else python); DATA_ROOT (data directory, default data/DATASET);
 # PTV3_LN_SPLIT_AFFINE (default 1: a LayerNorm variant for training that is about 1.2x faster and
-# equal up to rounding; the released checkpoints were trained with it); FORCE=1 starts afresh in an
-# EXP that already holds checkpoints; DRY_RUN=1 prints the command instead of running it.
+# equal up to rounding; the released checkpoints were trained with it).
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 abspath() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$PWD/$1" ;; esac; }
@@ -37,8 +35,8 @@ check_gpus() {  # check_gpus N HINT
   fi
 }
 
-DATASET="" CONFIG="" NGPU=1 EXP="" WEIGHT="" RESUME=false NAME="" EXTRA=""
-while getopts "d:c:g:n:w:r:e:p:o:h" opt; do
+DATASET="" CONFIG="" NGPU=1 EXP="" WEIGHT="" RESUME=false EXTRA=""
+while getopts "d:c:g:n:w:r:o:h" opt; do
   case $opt in
     d) DATASET=$OPTARG ;;
     c) CONFIG=$OPTARG ;;
@@ -46,8 +44,6 @@ while getopts "d:c:g:n:w:r:e:p:o:h" opt; do
     n) EXP=$OPTARG ;;
     w) WEIGHT=$OPTARG ;;
     r) RESUME=$OPTARG ;;
-    e) NAME=$OPTARG ;;
-    p) PYTHON=$OPTARG ;;
     o) EXTRA=$OPTARG ;;
     h) usage 0 ;;
     *) usage ;;
@@ -80,12 +76,11 @@ else
     WEIGHT=$(abspath "$WEIGHT")
     [ -s "$WEIGHT" ] || { echo "initial weights not found: $WEIGHT" >&2; exit 1; }
   fi
-  if ls "$EXP"/model/*.pth > /dev/null 2>&1 && [ "${FORCE:-0}" != 1 ]; then
-    echo "$EXP already holds checkpoints: continue it with -r true, choose another -n, or set FORCE=1" >&2
+  if ls "$EXP"/model/*.pth > /dev/null 2>&1; then
+    echo "$EXP already holds checkpoints: continue it with -r true or choose another -n" >&2
     exit 1
   fi
 fi
-NAME=${NAME:-$(basename "$EXP")}
 # the run reads its config from its own code snapshot (EXP/code/configs/...)
 [ "$RESUME" = True ] || CFG_FILE=$EXP/code/configs/$DATASET/$CONFIG.py
 
@@ -97,7 +92,7 @@ for p in "$REPO" "$EXP" ${WEIGHT:+"$WEIGHT"} ${DATA_ROOT:+"$(abspath "$DATA_ROOT
   esac
 done
 
-OPTS="save_path=$EXP experiment_name=$NAME"
+OPTS="save_path=$EXP"
 [ "$RESUME" = True ] && OPTS="$OPTS resume=True"
 [ -n "$WEIGHT" ] && OPTS="$OPTS weight=$WEIGHT"
 if [ -n "${DATA_ROOT:-}" ]; then
@@ -105,10 +100,6 @@ if [ -n "${DATA_ROOT:-}" ]; then
   OPTS="$OPTS data.train.data_root=$D data.val.data_root=$D"
 fi
 CMD=("$PYTHON" "$EXP/code/tools/train.py" --config-file "$CFG_FILE" --num-gpus "$NGPU" --options $OPTS $EXTRA)
-if [ "${DRY_RUN:-0}" = 1 ]; then
-  echo "cd $REPO && PYTHONPATH=$EXP/code ${CMD[*]}"
-  exit 0
-fi
 check_gpus "$NGPU" "; use a smaller -g (batch_size and num_worker in the configs are totals over all GPUs;
 for HOI4D stage 1 see the 1-GPU replay command in configs/hoi4d/pointttt-hoi4d-stage1.py)"
 

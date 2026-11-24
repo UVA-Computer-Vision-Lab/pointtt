@@ -49,7 +49,7 @@ Expected layout (other locations: set `DATA_ROOT` for the scripts below):
 ```
 data/
 ├── forainetv2/
-│   ├── meta_data/{train,val,test}_list.txt
+│   ├── meta_data/{train,test}_list.txt
 │   ├── train_val_data/*.ply              # training only
 │   └── test_data/*.ply
 └── hoi4d/
@@ -60,7 +60,7 @@ data/
 
 **FOR-instanceV2** ([Zenodo record 16742708](https://doi.org/10.5281/zenodo.16742708)). The script downloads
 `test_data.zip` (377 MB), checks its md5, unpacks it and installs the official test list (28 plots); with `--train` it
-also gets `train_val_data.zip` (2.4 GB, 11 GB unpacked) and the official training and validation lists (47 and 16 plots):
+also gets `train_val_data.zip` (2.4 GB, 11 GB unpacked) and the official training list (47 plots):
 
 ```bash
 bash scripts/prepare_forest.sh             # evaluation

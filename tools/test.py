@@ -37,18 +37,9 @@ def main():
             f"{args.config_file} is a training config (is_train = True); evaluate with an "
             "evaluation config, e.g. configs/<dataset>/pointttt-<dataset>-eval.py"
         )
-    if not probe.get("weight"):
-        sys.exit("no checkpoint given: pass --options weight=/path/to/checkpoint.pth")
     cfg = default_config_parser(args.config_file, args.options)
 
-    launch(
-        main_worker,
-        num_gpus_per_machine=args.num_gpus,
-        num_machines=args.num_machines,
-        machine_rank=args.machine_rank,
-        dist_url=args.dist_url,
-        cfg=(cfg,),
-    )
+    launch(main_worker, num_gpus=args.num_gpus, cfg=(cfg,))
 
 
 if __name__ == "__main__":

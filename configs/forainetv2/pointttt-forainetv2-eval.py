@@ -17,13 +17,8 @@ save_path = "exp/forainetv2_eval"
 num_worker = 4
 batch_size = 1
 batch_size_val = None
-batch_size_test = None
 epoch = 0
 eval_epoch = 1
-sync_bn = False
-enable_amp = False
-empty_cache_per_epoch = False
-find_unused_parameters = False
 hooks = [
     dict(type="CheckpointLoader", strict=True),
     dict(type="SemSegEvaluator"),
@@ -40,10 +35,8 @@ model = dict(
         chunk_size=102400,
         lact_head_dim=64,
         lact_base_lr=1e-2,
-        lact_use_muon=True,
         lact_enc_stages=[1, 2, 3, 4],
         lact_dec_stages=[0, 1, 2, 3],
-        freeze_backbone=False,
         train_with_ttt=True,
         in_channels=3,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
@@ -63,18 +56,6 @@ model = dict(
         proj_drop=0.0,
         drop_path=0.0,
         shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),  # only for the logged val loss
@@ -87,7 +68,7 @@ data = dict(
     num_classes=3,
     ignore_index=-1,
     names=["ground", "wood", "leaf"],
-    train=dict(),  # not used for evaluation (tools/train.py expects the key)
+    train=dict(),  # not used for evaluation (default_config_parser sets data.train.loop)
     val=dict(
         type="ForAINetV2Dataset",
         split="test",
@@ -111,6 +92,5 @@ data = dict(
                 feat_keys=("coord",),
             ),
         ],
-        test_mode=False,
     ),
 )

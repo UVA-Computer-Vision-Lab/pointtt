@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 """Environment check for the PoinTTT code (run by scripts/setup_env.sh at the end).
 
-    PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py                    # full check, needs a GPU
-    PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py --no-forward       # no GPU needed: versions, imports, configs
-    PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py --expect-torch 2.7.1
+    PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py --expect-torch 2.5.0               # full check, needs a GPU
+    PYTHONNOUSERSITE=1 python scripts/smoke_test_env.py --expect-torch 2.5.0 --no-forward  # no GPU needed
 
 Exit code 0 = all checks passed.
 """
@@ -91,8 +90,8 @@ def t_packages():
     import numpy as np
     assert int(np.__version__.split(".")[0]) == 2, f"numpy {np.__version__} (the environment uses 2.x)"
     out = [f"numpy {np.__version__}"]
-    for m in ("scipy", "h5py", "plyfile", "addict", "yapf", "termcolor", "tensorboardX", "timm", "einops",
-              "spconv", "torch_scatter", "flash_attn", "pointops"):
+    for m in ("h5py", "plyfile", "addict", "yapf", "timm", "einops", "spconv", "torch_scatter", "flash_attn",
+              "pointops"):
         mod = importlib.import_module(m)
         out.append(f"{m} {getattr(mod, '__version__', '')}".strip())
     from timm.layers import DropPath  # noqa: F401
@@ -205,23 +204,9 @@ def t_lact_temporal():
     return f"logits {tuple(out['seg_logits'].shape)}"
 
 
-def _default_torch():
-    """TORCH_VER if set, else the installed torch when it is a supported build, else 2.5.0."""
-    if os.environ.get("TORCH_VER"):
-        return os.environ["TORCH_VER"]
-    try:
-        import torch
-        version = torch.__version__.split("+")[0]
-        if version in ("2.5.0", "2.7.1"):
-            return version
-    except ImportError:
-        pass
-    return "2.5.0"
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--expect-torch", default=_default_torch())
+    ap.add_argument("--expect-torch", required=True, choices=("2.5.0", "2.7.1"))
     ap.add_argument("--no-forward", action="store_true", help="skip everything that needs a GPU")
     args = ap.parse_args()
     t_python()

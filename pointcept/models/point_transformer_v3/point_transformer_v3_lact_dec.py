@@ -17,10 +17,9 @@ Gradients of the fast-weight writes (`lact_write_grad`):
   By default (False) every write runs under torch.no_grad() and delta is a
   detached buffer: the task loss reaches a TTT layer only through its reads.
   The K/V rows of `to_qkv` and `lr_proj` therefore receive no gradient
-  (stop-gradient through the memory update); the released checkpoints were
-  trained this way. With lact_write_grad=True each LaCT layer's parameters are
-  also differentiated through all of that layer's writes in the scene, in
-  training only. The features entering the writes stay constants (no
+  (stop-gradient through the memory update). With lact_write_grad=True each
+  LaCT layer's parameters are also differentiated through all of that layer's
+  writes in the scene, in training only. The features entering the writes stay constants (no
   gradient reaches the backbone or upstream LaCT layers through a write).
   Forward values, fast-weight states and evaluation are bitwise identical to
   False. See TTTLayer for the mechanism and its memory cost. Training with
@@ -61,24 +60,13 @@ _WRITE_GRAD_AMP_ERROR = (
 
 def _autocast_enabled():
     """True inside an active CUDA or CPU autocast region."""
-    try:
-        return torch.is_autocast_enabled("cuda") or torch.is_autocast_enabled("cpu")
-    except TypeError:  # torch < 2.4: no device argument
-        return torch.is_autocast_enabled() or torch.is_autocast_cpu_enabled()
+    return torch.is_autocast_enabled("cuda") or torch.is_autocast_enabled("cpu")
 
 
 def validate_write_grad(value):
-    """Check a write-gradient mode: False or True (see TTTLayer).
-
-    "full" is reserved for a mode that would also send gradient into the
-    write inputs (backbone and upstream LaCT layers); it is not implemented.
-    """
+    """Check a write-gradient mode: False or True (see TTTLayer)."""
     if value is False or value is True:
         return value
-    if value == "full":
-        raise NotImplementedError(
-            'lact_write_grad="full" (gradient into the write inputs, i.e. the '
-            'backbone and upstream LaCT layers) is reserved and not implemented')
     raise ValueError(f"lact_write_grad must be False or True, got {value!r}")
 
 
@@ -121,11 +109,9 @@ class TTTLayer(nn.Module):
     write raises under autocast: train write-gradient runs in fp32.
     """
 
-    def __init__(self, dim, head_dim=64, inter_multi=1.0, base_lr=1e-2,
-                 use_muon=True, grad_clip_val=None, gate_init=0.0,
+    def __init__(self, dim, head_dim=64, base_lr=1e-2,
                  write_grad=False, checkpoint_write=True):
         super().__init__()
-        self.grad_clip_val = grad_clip_val
         self.write_grad = validate_write_grad(write_grad)
         self.checkpoint_write = bool(checkpoint_write)
         # Transient autograd state of the write history: plain attributes,
@@ -134,9 +120,6 @@ class TTTLayer(nn.Module):
         self._write_state_live = False   # False: a detached copy, no write recorded yet
         self._write_reads = []           # (state, read leaves, live) per grad-enabled read
         self._write_inputs = []          # (detached write input, its version counter)
-        self.dim = dim
-        while dim % head_dim != 0 and head_dim > 1:
-            head_dim -= 1
         self.head_dim = head_dim
         self.num_heads = dim // head_dim
 
@@ -147,7 +130,7 @@ class TTTLayer(nn.Module):
         self.lr_proj = nn.Linear(dim, self.lr_dim * 3 * self.num_heads, bias=False)
         self.base_lr_inv = inv_softplus(base_lr)
 
-        d_h = int(head_dim * inter_multi)
+        d_h = head_dim
 
         # Initial (learned) "slow" weights — trainable params
         self.w0_init = nn.Parameter(torch.randn(self.num_heads, d_h, head_dim) / (head_dim ** 0.5))
@@ -161,8 +144,6 @@ class TTTLayer(nn.Module):
         self.register_buffer('w1_delta', torch.zeros_like(self.w1_init.data))
         self.register_buffer('w2_delta', torch.zeros_like(self.w2_init.data))
 
-        self.use_muon = use_muon
-
         self.o_norm = nn.LayerNorm(head_dim)
         self.o_proj = nn.Linear(dim, dim, bias=False)
 
@@ -173,26 +154,7 @@ class TTTLayer(nn.Module):
         # gradient starts to reach the TTT internals too.
         # Forward uses tanh(gate) so the effective scale is bounded to [-1, 1]
         # and cannot blow up even if the raw parameter drifts large.
-        # Output gate: the layer adds tanh(residual_gate) * output. Default 0.0.
-        self.residual_gate = nn.Parameter(torch.full((1,), float(gate_init)))
-
-        # Optional per-parameter gradient clamping for TTT internals. Each
-        # backward call (one per chunk in chunk-wise training) passes each
-        # parameter's grad through this element-wise clamp before it is
-        # accumulated into `.grad`. Caps any single chunk's contribution so a
-        # pathological sample cannot dominate the TTT update. With write_grad
-        # the flush is one more backward call: the scene's whole write-history
-        # contribution is clamped once, so the result is no longer the exact
-        # gradient.
-        if self.grad_clip_val is not None:
-            clip_val = float(self.grad_clip_val)
-
-            def _clamp(g):
-                return g.clamp(-clip_val, clip_val)
-
-            for n, p in self.named_parameters():
-                if n != "residual_gate":
-                    p.register_hook(_clamp)
+        self.residual_gate = nn.Parameter(torch.zeros(1))
 
     def reset_fast_weights(self):
         """Reset fast weight drift to zero (w_cur = w_init)."""
@@ -208,11 +170,6 @@ class TTTLayer(nn.Module):
         self._write_state_live = False
         self._write_reads.clear()
         self._write_inputs.clear()
-
-    @property
-    def pending_write_reads(self):
-        """Number of recorded reads whose adjoints the next flush propagates."""
-        return len(self._write_reads)
 
     def _write_params(self):
         """Parameters entering an update, in _write_graph_fn's argument order."""
@@ -273,10 +230,9 @@ class TTTLayer(nn.Module):
         w2_for_update = w2_init + delta2
         dw0, dw1, dw2 = self._fast_weight_grads(
             w0_for_update, w1_for_update, w2_for_update, ttt_k, ttt_v, lr0, lr1, lr2)
-        if self.use_muon:
-            dw0 = zeropower_via_newtonschulz5(dw0)
-            dw1 = zeropower_via_newtonschulz5(dw1)
-            dw2 = zeropower_via_newtonschulz5(dw2)
+        dw0 = zeropower_via_newtonschulz5(dw0)
+        dw1 = zeropower_via_newtonschulz5(dw1)
+        dw2 = zeropower_via_newtonschulz5(dw2)
 
         w0_new = w0_for_update + dw0
         w1_new = w1_for_update + dw1
@@ -372,7 +328,6 @@ class TTTLayer(nn.Module):
         feat = point.feat
         offset = point.offset
         starts = [0] + offset.cpu().tolist()
-        device = feat.device
         H, Dk = self.num_heads, self.head_dim
         record = self._records_writes()
 
@@ -448,10 +403,9 @@ class TTTLayer(nn.Module):
                 dw0 = torch.bmm(dgate_before_act, (ttt_k * lr0).type_as(dgate_before_act))
                 dw2 = torch.bmm(dhidden_before_mul, (ttt_k * lr2).type_as(dhidden_before_mul))
 
-                if self.use_muon:
-                    dw0 = zeropower_via_newtonschulz5(dw0)
-                    dw1 = zeropower_via_newtonschulz5(dw1)
-                    dw2 = zeropower_via_newtonschulz5(dw2)
+                dw0 = zeropower_via_newtonschulz5(dw0)
+                dw1 = zeropower_via_newtonschulz5(dw1)
+                dw2 = zeropower_via_newtonschulz5(dw2)
 
                 w0_new = w0_for_update + dw0
                 w1_new = w1_for_update + dw1
@@ -493,38 +447,19 @@ class PointTransformerV3LaCTDec(PointModule):
 
     def __init__(
         self,
+        lact_enc_stages,        # encoder stages followed by a TTT layer
+        lact_dec_stages,        # decoder stages followed by a TTT layer
         chunk_size=10240,
         lact_head_dim=64,
         lact_base_lr=1e-2,
-        lact_use_muon=True,
-        lact_enc_stages=None,   # which encoder stages get TTT, None = all
-        lact_dec_stages=None,   # which decoder stages get TTT, None = all
-        freeze_backbone=True,
         train_with_ttt=False,   # if False, TTT layers are skipped in both train
                                 # and eval (pure chunk-wise PTv3).
-        lact_grad_clip_val=None,  # per-chunk element-wise grad clamp on TTT
-                                  # internal params. None = no extra clip.
-        lact_inter_multi=1.0,     # SwiGLU intermediate dim multiplier for TTT.
-                                  # >1 widens w0/w1/w2 internal hidden dim.
-        lact_gate_init=0.0,       # initial value of each TTT layer's residual
-                                  # gate. 0.0 = LoRA-style no-op at init;
-                                  # >0 engages TTT from step 0 so its
-                                  # internals receive gradient and co-adapt.
-        chunk_order="3d",         # "3d": full 3D Hilbert over (x, y, z).
-                                  # "xy": 2D Hilbert over (x, y) with z as
-                                  #       tiebreak → chunks are vertical
-                                  #       columns (prisms over the full z range).
-        ttt_span=None,            # Eval-time TTT context length, in chunks.
-                                  # None = full scene (default — TTT state
-                                  # spans all chunks of one scene). Setting
-                                  # e.g. 2 makes TTT reset every 2 chunks, so
-                                  # cross-chunk context is capped at that span.
         lact_write_grad=False,    # Training only. False = fast-weight writes
                                   # under stop-gradient (K/V rows of to_qkv and
-                                  # lr_proj get no gradient; the released
-                                  # checkpoints). True = differentiate each LaCT
-                                  # layer's parameters through all of its writes
-                                  # in the scene; the write inputs (backbone
+                                  # lr_proj get no gradient). True =
+                                  # differentiate each LaCT layer's parameters
+                                  # through all of its writes in the scene;
+                                  # the write inputs (backbone
                                   # features) stay constants. Forward and eval
                                   # are identical for both values. True trains
                                   # in fp32 only (enable_amp=False).
@@ -534,26 +469,16 @@ class PointTransformerV3LaCTDec(PointModule):
     ):
         super().__init__()
         self.chunk_size = chunk_size
-        self.ttt_span = ttt_span
         self.train_with_ttt = train_with_ttt
         self.lact_write_grad = validate_write_grad(lact_write_grad)
         self.lact_write_grad_checkpoint = bool(lact_write_grad_checkpoint)
         if self.lact_write_grad and not train_with_ttt:
             warnings.warn("lact_write_grad has no effect with train_with_ttt=False")
-        assert chunk_order in ("3d", "xy"), f"bad chunk_order: {chunk_order}"
-        self.chunk_order = chunk_order
 
         self.ptv3 = PointTransformerV3(**ptv3_kwargs)
 
         enc_channels = ptv3_kwargs.get('enc_channels', (32, 64, 128, 256, 512))
         dec_channels = ptv3_kwargs.get('dec_channels', (64, 64, 128, 256))
-        num_enc_stages = len(enc_channels)
-        num_dec_stages = len(dec_channels)
-
-        if lact_enc_stages is None:
-            lact_enc_stages = list(range(num_enc_stages))
-        if lact_dec_stages is None:
-            lact_dec_stages = list(range(num_dec_stages))
         self.lact_enc_stages = lact_enc_stages
         self.lact_dec_stages = lact_dec_stages
 
@@ -562,9 +487,7 @@ class PointTransformerV3LaCTDec(PointModule):
         for s in lact_enc_stages:
             self.enc_ttt_layers[str(s)] = TTTLayer(
                 dim=enc_channels[s], head_dim=lact_head_dim,
-                base_lr=lact_base_lr, use_muon=lact_use_muon,
-                grad_clip_val=lact_grad_clip_val,
-                inter_multi=lact_inter_multi, gate_init=lact_gate_init,
+                base_lr=lact_base_lr,
                 write_grad=self.lact_write_grad,
                 checkpoint_write=self.lact_write_grad_checkpoint)
 
@@ -573,15 +496,9 @@ class PointTransformerV3LaCTDec(PointModule):
         for s in lact_dec_stages:
             self.dec_ttt_layers[str(s)] = TTTLayer(
                 dim=dec_channels[s], head_dim=lact_head_dim,
-                base_lr=lact_base_lr, use_muon=lact_use_muon,
-                grad_clip_val=lact_grad_clip_val,
-                inter_multi=lact_inter_multi, gate_init=lact_gate_init,
+                base_lr=lact_base_lr,
                 write_grad=self.lact_write_grad,
                 checkpoint_write=self.lact_write_grad_checkpoint)
-
-        if freeze_backbone:
-            for p in self.ptv3.parameters():
-                p.requires_grad = False
 
     def _reset_all_ttt(self):
         for ttt in self.enc_ttt_layers.values():
@@ -610,29 +527,8 @@ class PointTransformerV3LaCTDec(PointModule):
                 "flushed before the optimizer step")
 
     def sort_points_for_chunking(self, grid_coord):
-        """Return argsort indices that arrange points for chunk-wise forward.
-
-        "3d"  — 3D Hilbert over (x, y, z). Adjacent chunk points are
-                3D-spatially close.
-        "xy"  — 2D Hilbert over (x, y) only, with z used only as an in-column
-                ordering. Each chunk becomes a vertical prism, preserving
-                trees that span the full z range.
-        """
-        if self.chunk_order == "3d":
-            return hilbert_encode(grid_coord, depth=16).argsort()
-        # "xy": zero out the z column to get 2D Hilbert (same code works
-        # because the encoder interleaves bits — with z=0, only the x/y bits
-        # contribute). Ties on xy are broken by the original z (stable sort).
-        gc_xy = grid_coord.clone()
-        gc_xy[:, 2] = 0
-        primary = hilbert_encode(gc_xy, depth=16)  # int64 per point
-        # stable argsort on primary preserves input order among ties; we want
-        # z-monotonic order within a column, so sort by z first (stable), then
-        # by primary — the latter dominates.
-        z_sorted = grid_coord[:, 2].argsort(stable=True)
-        primary_rearranged = primary[z_sorted]
-        outer = primary_rearranged.argsort(stable=True)
-        return z_sorted[outer]
+        """Argsort of the 3D Hilbert code: the point order that is cut into chunks."""
+        return hilbert_encode(grid_coord, depth=16).argsort()
 
     def _run_one_chunk(self, chunk_data, use_ttt=True):
         """Run one chunk through PTv3 encoder+decoder, optionally with TTT layers."""
@@ -661,12 +557,11 @@ class PointTransformerV3LaCTDec(PointModule):
                 point = self.enc_ttt_layers[str(s_idx)](point)
 
         # Decoder with optional TTT after each stage
-        if not self.ptv3.cls_mode:
-            for s_name, dec_stage in self.ptv3.dec.named_children():
-                point = dec_stage(point)
-                s_idx = int(s_name.replace("dec", ""))
-                if use_ttt and s_idx in self.lact_dec_stages:
-                    point = self.dec_ttt_layers[str(s_idx)](point)
+        for s_name, dec_stage in self.ptv3.dec.named_children():
+            point = dec_stage(point)
+            s_idx = int(s_name.replace("dec", ""))
+            if use_ttt and s_idx in self.lact_dec_stages:
+                point = self.dec_ttt_layers[str(s_idx)](point)
 
         for name, m in self.ptv3.named_modules():
             if name in bn_switched:
@@ -718,7 +613,6 @@ class PointTransformerV3LaCTDec(PointModule):
             s, e = int(starts[b]), int(starts[b + 1])
             Ns = e - s
             gc_b = gc[s:e]
-            # Hilbert-based chunking; "3d" = 3D Hilbert, "xy" = vertical prisms.
             sorted_idx = self.sort_points_for_chunking(gc_b)
 
             chunk_ranges = [(j, min(j + W, Ns)) for j in range(0, Ns, W)]
@@ -774,7 +668,6 @@ class PointTransformerV3LaCTDec(PointModule):
         coord = data_dict["coord"]
         gc = data_dict["grid_coord"]
         offset = data_dict["offset"]
-        N = feat.shape[0]
 
         starts = [0] + offset.cpu().tolist()
         all_feats = []
@@ -783,7 +676,6 @@ class PointTransformerV3LaCTDec(PointModule):
             s, e = int(starts[b]), int(starts[b + 1])
             Ns = e - s
             gc_b = gc[s:e]
-            # Hilbert-based chunking; "3d" = 3D Hilbert, "xy" = vertical prisms.
             sorted_idx = self.sort_points_for_chunking(gc_b)
             inv_idx = torch.empty_like(sorted_idx)
             inv_idx[sorted_idx] = torch.arange(Ns, device=device)
@@ -794,11 +686,8 @@ class PointTransformerV3LaCTDec(PointModule):
 
             def _make_chunk(cs, ce):
                 idx = sorted_idx[cs:ce] + s
-                d = dict(feat=feat[idx], coord=coord[idx], grid_coord=gc[idx],
-                         offset=torch.tensor([ce - cs], device=device))
-                if "segment" in data_dict:
-                    d["segment"] = data_dict["segment"][idx]
-                return d
+                return dict(feat=feat[idx], coord=coord[idx], grid_coord=gc[idx],
+                            offset=torch.tensor([ce - cs], device=device))
 
             # TTT is used iff train_with_ttt flag is set — eval follows training
             # mode so non-TTT models aren't polluted by untrained TTT layers.
@@ -814,28 +703,18 @@ class PointTransformerV3LaCTDec(PointModule):
                 sorted_feat = torch.cat(combined, dim=0)
                 all_feats.append(sorted_feat[inv_idx])
             else:
-                # Process chunks in non-overlapping windows of `span` chunks.
-                # ttt_span=None → one window over all chunks (full-scene TTT).
-                # ttt_span=K → TTT state resets every K chunks, capping the
-                # cross-chunk context length.
-                span = self.ttt_span if self.ttt_span is not None else nw
-                span = max(1, min(span, nw))
-                detach_fn = (lambda t: t.detach()) if not self.training else (lambda t: t)
                 bwd_outputs = [None] * nw
-
-                for win_start in range(0, nw, span):
-                    win_end = min(win_start + span, nw)
-                    # ---- L→R warm-up within window: no_grad, evolves drift. ----
-                    self._reset_all_ttt()
-                    with torch.no_grad():
-                        for i in range(win_start, win_end):
-                            cs, ce = chunk_ranges[i]
-                            _ = self._run_one_chunk(_make_chunk(cs, ce), use_ttt=True)
-                    # ---- R→L pred within window (NO reset; continues from L→R end). ----
-                    for i in range(win_end - 1, win_start - 1, -1):
+                # ---- L→R warm-up over all chunks: no_grad, evolves drift. ----
+                self._reset_all_ttt()
+                with torch.no_grad():
+                    for i in range(nw):
                         cs, ce = chunk_ranges[i]
-                        chunk_point = self._run_one_chunk(_make_chunk(cs, ce), use_ttt=True)
-                        bwd_outputs[i] = detach_fn(chunk_point.feat)
+                        _ = self._run_one_chunk(_make_chunk(cs, ce), use_ttt=True)
+                # ---- R→L prediction (NO reset; continues from L→R end). ----
+                for i in range(nw - 1, -1, -1):
+                    cs, ce = chunk_ranges[i]
+                    chunk_point = self._run_one_chunk(_make_chunk(cs, ce), use_ttt=True)
+                    bwd_outputs[i] = chunk_point.feat.detach()
 
                 sorted_feat = torch.cat(bwd_outputs, dim=0)
                 all_feats.append(sorted_feat[inv_idx])
@@ -849,8 +728,7 @@ class PointTransformerV3LaCTDec(PointModule):
         ptv3_prefix = prefix + "ptv3."
         has_ptv3 = any(k.startswith(ptv3_prefix) for k in state_dict)
         if not has_ptv3:
-            keys_to_remap = [k for k in list(state_dict.keys())
-                             if k.startswith(prefix) and not k.startswith(prefix + "ttt_")]
+            keys_to_remap = [k for k in list(state_dict.keys()) if k.startswith(prefix)]
             for k in keys_to_remap:
                 suffix = k[len(prefix):]
                 if any(suffix.startswith(p) for p in ['enc.', 'dec.', 'embedding.']):

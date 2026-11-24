@@ -6,12 +6,5 @@
 
 # environments and build artefacts
 /env/
-/env-*/
-build/
-*.egg-info/
-*.so
 __pycache__/
 *.py[cod]
-
-# logging tools
-wandb/

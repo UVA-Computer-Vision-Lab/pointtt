@@ -13,9 +13,8 @@ One GPU, 4 sequences per iteration, emulating rank 0 of an 8-process run (ddp_em
 each epoch it trains on rank 0's share of the sequences (69 iterations). The model runs every
 backward pass inside its forward pass, chunk by chunk, where DistributedDataParallel does not
 average gradients, so the 8 processes of a multi-GPU launch train independently and only rank 0 is
-saved; one process fed with rank 0's data is the same training at 1/8 of the GPU time. The literal
-8-GPU launch is -g 8 -o "batch_size=32 num_worker=16". AMP autocast is on; the per-chunk backward
-passes run outside the GradScaler, as in the original run.
+saved; one process fed with rank 0's data is the same training at 1/8 of the GPU time. AMP
+autocast is on; the per-chunk backward passes run outside the GradScaler, as in the original run.
 
 Time: about 50 minutes per epoch on one NVIDIA B200 for the release run, which used a batched
 version of the fast-weight update (same results up to rounding). This repository updates the
@@ -35,7 +34,6 @@ ddp_emulate_world_size = 8  # one process = rank 0 of an 8-process run; ignored 
 epoch = 50
 eval_epoch = 50
 evaluate = False  # evaluate checkpoints with scripts/test.sh
-clip_grad = None
 enable_amp = True
 empty_cache = True
 mix_prob = 0.0
@@ -56,13 +54,10 @@ model = dict(
     backbone_out_channels=64,
     backbone=dict(
         type="PT-v3-LaCT-Temporal",
-        chunk_size=10240,
         lact_head_dim=64,
         lact_base_lr=1e-2,
-        lact_use_muon=True,
         lact_enc_stages=[1, 2, 3, 4],
         lact_dec_stages=[0, 1, 2, 3],
-        freeze_backbone=False,
         train_with_ttt=True,
         max_batch_size_per_gpu=4,
         in_channels=3,
@@ -83,18 +78,6 @@ model = dict(
         proj_drop=0.0,
         drop_path=0.3,
         shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("HOI4D",),
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
@@ -116,9 +99,6 @@ scheduler = dict(
 # data
 data_root = "data/hoi4d"  # train2.h5, train3.h5, train4.h5 (see README)
 data = dict(
-    num_classes=49,
-    ignore_index=-1,
-    names=[str(i) for i in range(49)],
     train=dict(
         type="HOI4DDataset",
         sample_unit="sequence",  # one full 300-frame sequence per sample, 2,221 samples
@@ -146,6 +126,5 @@ data = dict(
                 feat_keys=("coord",),
             ),
         ],
-        test_mode=False,
     ),
 )

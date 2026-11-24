@@ -26,8 +26,6 @@ MIT License; see THIRD_PARTY_NOTICES.md).
 Author: Wentao
 """
 
-import itertools
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -85,12 +83,6 @@ class BatchedTTTLayer(_BaseTTTLayer):
                               torch.zeros(max_batch_size, H, d_h, Dk),
                               persistent=False)
 
-    def reset_fast_weights(self):
-        self.w0_delta.zero_()
-        self.w1_delta.zero_()
-        self.w2_delta.zero_()
-        self.clear_write_graph()
-
     # ---- differentiable write history per slot (write_grad) ----
     def clear_write_graph(self):
         super().clear_write_graph()
@@ -124,12 +116,9 @@ class BatchedTTTLayer(_BaseTTTLayer):
 
     def forward(self, point):
         feat = point.feat
-        offset = point.offset
-        # slot boundaries as Python ints: supplied by _build_mega_chunk ("offset_list") so that
-        # no device-to-host copy is needed here; otherwise they are read from `offset`.
-        starts = point.get("offset_list", None)
-        if starts is None or len(starts) != len(offset) + 1:
-            starts = [0] + offset.cpu().tolist()
+        # slot boundaries as Python ints, supplied by _build_mega_chunk and SerializedPooling
+        # ("offset_list"), so that no device-to-host copy is needed here.
+        starts = point["offset_list"]
         H, Dk = self.num_heads, self.head_dim
         record = self._records_writes()
 
@@ -184,10 +173,9 @@ class BatchedTTTLayer(_BaseTTTLayer):
                     dw0 = torch.bmm(dgate_before_act, (ttt_k * lr0).type_as(dgate_before_act))
                     dw2 = torch.bmm(dhidden_before_mul, (ttt_k * lr2).type_as(dhidden_before_mul))
 
-                    if self.use_muon:
-                        dw0 = zeropower_via_newtonschulz5(dw0)
-                        dw1 = zeropower_via_newtonschulz5(dw1)
-                        dw2 = zeropower_via_newtonschulz5(dw2)
+                    dw0 = zeropower_via_newtonschulz5(dw0)
+                    dw1 = zeropower_via_newtonschulz5(dw1)
+                    dw2 = zeropower_via_newtonschulz5(dw2)
 
                     w0_new = w0_d + dw0
                     w1_new = w1_d + dw1
@@ -256,19 +244,15 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
     """
 
     def __init__(self, max_batch_size_per_gpu: int = 8,
-                 ttt_online_mode: bool = False,
                  ttt_online_view_avg: bool = False,
                  ttt_online_extra_views: int = 0, **kwargs):
         super().__init__(**kwargs)
-        # Evaluation modes (TTT layers enabled, train_with_ttt=True):
-        #   default: no-grad L→R warm-up pass over all clips of a sequence, then
-        #     an R→L output pass that continues from the warm-up state.
-        #   ttt_online_mode: causal streaming inference. One chronological pass
-        #     over the chunks; per chunk t the fast weights are updated FIRST
-        #     (W_t = Update(W_{t-1}, H_t)) and the prediction is computed with
-        #     W_t. No warm-up pass, no access to future chunks; the state is
-        #     reset only at sample (= video) start.
-        self.ttt_online_mode = ttt_online_mode
+        assert self.train_with_ttt, "PT-v3-LaCT-Temporal runs its TTT layers (train_with_ttt=True)"
+        # Evaluation (forward): causal streaming inference. One chronological
+        #   pass over the chunks; per chunk t the fast weights are updated FIRST
+        #   (W_t = Update(W_{t-1}, H_t)) and the prediction is computed with
+        #   W_t. No warm-up pass, no access to future chunks; the state is
+        #   reset only at sample (= video) start.
         #   ttt_online_view_avg: predict each chunk twice — once with W_{t-1}
         #     (updates frozen) and once with W_t (update-then-apply) — and
         #     average the feature views. Both views are causal.
@@ -281,10 +265,6 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         # Replace the TTT layers built by the parent ctor with batched ones.
         H_dim = kwargs.get('lact_head_dim', 64)
         base_lr = kwargs.get('lact_base_lr', 1e-2)
-        use_muon = kwargs.get('lact_use_muon', True)
-        grad_clip = kwargs.get('lact_grad_clip_val', None)
-        inter_multi = kwargs.get('lact_inter_multi', 1.0)
-        gate_init = kwargs.get('lact_gate_init', 0.0)
         enc_channels = kwargs.get('enc_channels', (32, 64, 128, 256, 512))
         dec_channels = kwargs.get('dec_channels', (64, 64, 128, 256))
 
@@ -292,9 +272,7 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         for s in self.lact_enc_stages:
             new_enc[str(s)] = BatchedTTTLayer(
                 dim=enc_channels[s], head_dim=H_dim,
-                base_lr=base_lr, use_muon=use_muon,
-                grad_clip_val=grad_clip, inter_multi=inter_multi,
-                gate_init=gate_init,
+                base_lr=base_lr,
                 max_batch_size=max_batch_size_per_gpu,
                 write_grad=self.lact_write_grad,
                 checkpoint_write=self.lact_write_grad_checkpoint,
@@ -305,9 +283,7 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         for s in self.lact_dec_stages:
             new_dec[str(s)] = BatchedTTTLayer(
                 dim=dec_channels[s], head_dim=H_dim,
-                base_lr=base_lr, use_muon=use_muon,
-                grad_clip_val=grad_clip, inter_multi=inter_multi,
-                gate_init=gate_init,
+                base_lr=base_lr,
                 max_batch_size=max_batch_size_per_gpu,
                 write_grad=self.lact_write_grad,
                 checkpoint_write=self.lact_write_grad_checkpoint,
@@ -315,8 +291,6 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         self.dec_ttt_layers = new_dec
 
         self.max_batch_size_per_gpu = max_batch_size_per_gpu
-        for layer in itertools.chain(self.enc_ttt_layers.values(), self.dec_ttt_layers.values()):
-            assert layer.write_grad == self.lact_write_grad, "write_grad not propagated"
 
     def _set_ttt_updates(self, enabled: bool):
         for layer in self.enc_ttt_layers.values():
@@ -335,13 +309,6 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         offset = data_dict["offset"]
         starts = [0] + offset.cpu().tolist()
         return [(int(starts[b]), int(starts[b + 1])) for b in range(len(starts) - 1)]
-
-    def _all_unique_clips(self, batch_offsets, clip_idx_full):
-        all_clips = set()
-        for s, e in batch_offsets:
-            ci_b = clip_idx_full[s:e]
-            all_clips.update(torch.unique(ci_b).cpu().tolist())
-        return sorted(all_clips)
 
     def _prepare_clip_index(self, batch_offsets, clip_idx_full):
         """Per-slot point indices grouped by clip, computed once per sample batch.
@@ -370,8 +337,7 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         unique_clips = present.nonzero(as_tuple=True)[0].tolist()
         return unique_clips, cache
 
-    def _build_mega_chunk(self, data_dict, k, batch_offsets, clip_idx_full,
-                          want_segment=True, index_cache=None):
+    def _build_mega_chunk(self, data_dict, k, index_cache, want_segment=True):
         """Concat clip-k points from every batch slot. ``offset`` segments
         keep them separate so TTT/PTv3 know batch boundaries."""
         device = data_dict["feat"].device
@@ -381,14 +347,8 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         per_slot_idx = []
         per_slot_sizes = []
 
-        for b, (s, e) in enumerate(batch_offsets):
-            if index_cache is not None:
-                order, cum = index_cache["slots"][b]
-                global_idx = order[cum[k]:cum[k + 1]]
-            else:
-                ci_b = clip_idx_full[s:e]
-                local = (ci_b == k).nonzero(as_tuple=True)[0]
-                global_idx = local + s
+        for order, cum in index_cache["slots"]:
+            global_idx = order[cum[k]:cum[k + 1]]
             per_slot_idx.append(global_idx)
             per_slot_sizes.append(int(global_idx.shape[0]))
 
@@ -398,13 +358,9 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         offset_list = [0]
         for n in per_slot_sizes:
             offset_list.append(offset_list[-1] + n)
-        if index_cache is not None:
-            # views of per-batch tensors: no host->device copy per chunk
-            chunk["offset"] = index_cache["offsets"][k]
-            repeats = index_cache["counts"][k]
-        else:
-            chunk["offset"] = torch.tensor(offset_list[1:], device=device)
-            repeats = torch.tensor(per_slot_sizes, device=device)
+        # views of per-batch tensors: no host->device copy per chunk
+        chunk["offset"] = index_cache["offsets"][k]
+        repeats = index_cache["counts"][k]
         # slot boundaries on the host (BatchedTTTLayer / SerializedPooling read them instead of
         # copying ``offset`` back) and the per-point slot id, so that Point() does not have to
         # derive it with a synchronising repeat_interleave.
@@ -434,31 +390,24 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
         # instead of one per chunk (each .item() is a full device synchronisation)
         total_loss = torch.zeros((), dtype=torch.float64, device=clip_idx_full.device)
 
-        if self.train_with_ttt:
-            # L→R warm-up under no_grad over all clips → evolves delta.
-            self._reset_all_ttt()
-            with torch.no_grad():
-                for k in unique_clips:
-                    chunk, _ = self._build_mega_chunk(
-                        data_dict, k, batch_offsets, clip_idx_full,
-                        index_cache=index_cache)
-                    _ = self._run_one_chunk(chunk, use_ttt=True)
-            iter_order = list(reversed(unique_clips))
-        else:
-            iter_order = list(unique_clips)
+        # L→R warm-up under no_grad over all clips → evolves delta.
+        self._reset_all_ttt()
+        with torch.no_grad():
+            for k in unique_clips:
+                chunk, _ = self._build_mega_chunk(data_dict, k, index_cache)
+                _ = self._run_one_chunk(chunk, use_ttt=True)
 
-        # R→L (or single-pass) per-clip forward + backward.
-        for k in iter_order:
-            chunk, _ = self._build_mega_chunk(
-                data_dict, k, batch_offsets, clip_idx_full, index_cache=index_cache)
-            chunk_point = self._run_one_chunk(chunk, use_ttt=self.train_with_ttt)
+        # R→L per-clip forward + backward.
+        for k in reversed(unique_clips):
+            chunk, _ = self._build_mega_chunk(data_dict, k, index_cache)
+            chunk_point = self._run_one_chunk(chunk, use_ttt=True)
             logits = seg_head(chunk_point.feat)
             loss_c = criteria(logits, chunk["segment"])
             loss_c.backward()
             total_loss += loss_c.detach().double()
             del chunk_point, logits, loss_c, chunk
 
-        if self.lact_write_grad and self.train_with_ttt:
+        if self.lact_write_grad:
             # every clip has run backward: one pass through all slots' write history
             self._flush_all_write_gradients()
         return total_loss.item() / max(nw, 1)
@@ -484,88 +433,52 @@ class PointTransformerV3LaCTTemporal(PointTransformerV3LaCTDec):
                 out_feats_[idx_t] = feat_k_[pos:pos + n_b]
                 pos += n_b
 
-        if not self.train_with_ttt:
+        # Causal streaming inference: single chronological pass; chunk t
+        # is predicted with W_t = Update(W_{t-1}, H_t). State is reset at
+        # sample start (= video start), never within the video, and no
+        # future chunk is ever touched.
+        self._reset_all_ttt()
+        self._set_ttt_update_first(True)
+        try:
             for k in unique_clips:
                 chunk, per_slot_idx = self._build_mega_chunk(
-                    data_dict, k, batch_offsets, clip_idx_full,
-                    want_segment=False, index_cache=index_cache)
-                chunk_point = self._run_one_chunk(chunk, use_ttt=False)
-                if out_feats is None:
-                    out_feats = torch.empty(
-                        (N, chunk_point.feat.shape[1]),
-                        dtype=chunk_point.feat.dtype, device=device)
-                _scatter(out_feats, chunk_point.feat, per_slot_idx)
-        elif self.ttt_online_mode:
-            # Causal streaming inference: single chronological pass; chunk t
-            # is predicted with W_t = Update(W_{t-1}, H_t). State is reset at
-            # sample start (= video start), never within the video, and no
-            # future chunk is ever touched.
-            detach_fn = (lambda t: t.detach()) if not self.training else (lambda t: t)
-            self._reset_all_ttt()
-            self._set_ttt_update_first(True)
-            try:
-                for k in unique_clips:
-                    chunk, per_slot_idx = self._build_mega_chunk(
-                        data_dict, k, batch_offsets, clip_idx_full,
-                        want_segment=False, index_cache=index_cache)
-                    feat_prev = None
-                    if self.ttt_online_view_avg:
-                        # View 1: predict chunk t with W_{t-1} (updates off).
-                        # Causal — uses only past state + current input.
-                        self._set_ttt_updates(False)
-                        self._set_ttt_update_first(False)
-                        cp_prev = self._run_one_chunk(chunk, use_ttt=True)
-                        feat_prev = detach_fn(cp_prev.feat)
-                        self._set_ttt_updates(True)
-                        self._set_ttt_update_first(True)
-                    # View 2 (or only view): update-then-apply with W_t.
-                    chunk_point = self._run_one_chunk(chunk, use_ttt=True)
-                    feat_k = detach_fn(chunk_point.feat)
-                    views_sum, n_views = feat_k, 1
-                    if feat_prev is not None:
-                        views_sum = views_sum + feat_prev
-                        n_views += 1
-                    if self.ttt_online_extra_views > 0:
-                        # Extra frozen-state forwards of the SAME chunk — each
-                        # re-randomizes serialization order (shuffle_orders).
-                        self._set_ttt_updates(False)
-                        self._set_ttt_update_first(False)
-                        for _ in range(self.ttt_online_extra_views):
-                            cp_x = self._run_one_chunk(chunk, use_ttt=True)
-                            views_sum = views_sum + detach_fn(cp_x.feat)
-                            n_views += 1
-                        self._set_ttt_updates(True)
-                        self._set_ttt_update_first(True)
-                    feat_k = views_sum / n_views
-                    if out_feats is None:
-                        out_feats = torch.empty(
-                            (N, feat_k.shape[1]),
-                            dtype=feat_k.dtype, device=device)
-                    _scatter(out_feats, feat_k, per_slot_idx)
-            finally:
-                self._set_ttt_update_first(False)
-        else:
-            # L→R warm-up under no_grad over all clips (evolves the fast
-            # weights), then the R→L output pass continuing from that state.
-            detach_fn = (lambda t: t.detach()) if not self.training else (lambda t: t)
-            self._reset_all_ttt()
-            with torch.no_grad():
-                for k in unique_clips:
-                    chunk, _ = self._build_mega_chunk(
-                        data_dict, k, batch_offsets, clip_idx_full,
-                        want_segment=False, index_cache=index_cache)
-                    _ = self._run_one_chunk(chunk, use_ttt=True)
-            for k in reversed(unique_clips):
-                chunk, per_slot_idx = self._build_mega_chunk(
-                    data_dict, k, batch_offsets, clip_idx_full,
-                    want_segment=False, index_cache=index_cache)
+                    data_dict, k, index_cache, want_segment=False)
+                feat_prev = None
+                if self.ttt_online_view_avg:
+                    # View 1: predict chunk t with W_{t-1} (updates off).
+                    # Causal — uses only past state + current input.
+                    self._set_ttt_updates(False)
+                    self._set_ttt_update_first(False)
+                    cp_prev = self._run_one_chunk(chunk, use_ttt=True)
+                    feat_prev = cp_prev.feat.detach()
+                    self._set_ttt_updates(True)
+                    self._set_ttt_update_first(True)
+                # View 2 (or only view): update-then-apply with W_t.
                 chunk_point = self._run_one_chunk(chunk, use_ttt=True)
-                feat_k = detach_fn(chunk_point.feat)
+                feat_k = chunk_point.feat.detach()
+                views_sum, n_views = feat_k, 1
+                if feat_prev is not None:
+                    views_sum = views_sum + feat_prev
+                    n_views += 1
+                if self.ttt_online_extra_views > 0:
+                    # Extra frozen-state forwards of the SAME chunk — each
+                    # re-randomizes serialization order (shuffle_orders).
+                    self._set_ttt_updates(False)
+                    self._set_ttt_update_first(False)
+                    for _ in range(self.ttt_online_extra_views):
+                        cp_x = self._run_one_chunk(chunk, use_ttt=True)
+                        views_sum = views_sum + cp_x.feat.detach()
+                        n_views += 1
+                    self._set_ttt_updates(True)
+                    self._set_ttt_update_first(True)
+                feat_k = views_sum / n_views
                 if out_feats is None:
                     out_feats = torch.empty(
                         (N, feat_k.shape[1]),
                         dtype=feat_k.dtype, device=device)
                 _scatter(out_feats, feat_k, per_slot_idx)
+        finally:
+            self._set_ttt_update_first(False)
 
         if out_feats is None:
             out_feats = feat_in

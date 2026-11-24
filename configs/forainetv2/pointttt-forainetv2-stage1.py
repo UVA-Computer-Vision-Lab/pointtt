@@ -1,18 +1,17 @@
 """PoinTTT on FOR-instanceV2, stage 1: chunk-wise PTv3 trained from scratch.
 
 The backbone is PT-v3-LaCT-Dec with its TTT layers switched off (train_with_ttt=False): whole
-plots, 0.05 m voxels, 102,400 voxels per chunk, one plot per iteration, 1 GPU, fp32. The model is
-evaluated after every trainer epoch; model/model_best.pth initialises stage 2
-(pointttt-forainetv2-stage2.py).
+plots, 0.05 m voxels, 102,400 voxels per chunk, one plot per iteration, 1 GPU, fp32. Stage 2
+(pointttt-forainetv2-stage2.py) starts from model/model_best.pth.
 
     bash scripts/train.sh -d forainetv2 -c pointttt-forainetv2-stage1 -g 1 -n exp/forainetv2/stage1
 
 Schedule: 40 trainer epochs x 470 iterations (10 passes over the 47 training plots each, 400 in
 total). The stage-1 run behind the released checkpoint used exactly this config (seed included),
 about 8.5 hours on one NVIDIA B200 including the 40 evaluations, peak GPU memory about 16 GB
-(nvidia-smi). Every epoch is saved
-(model/epoch_N.pth, about 0.55 GB each); stage 2 needs only model_best.pth, so
--o "save_every_epoch=False" (keep every 10th) saves disk without changing the training.
+(nvidia-smi). Every epoch is saved (model/epoch_N.pth, about 0.55 GB each); stage 2 needs only
+model_best.pth, so -o "save_every_epoch=False" (keep every 10th) saves disk without changing the
+training.
 
 lact_enc_stages / lact_dec_stages create the TTT layers of stages 3-4 and 0-3 although they are not
 used here: they are part of the seeded initialisation and of the checkpoint that stage 2 loads.
@@ -25,7 +24,7 @@ seed = 13235636
 num_worker = 4
 batch_size = 1  # one whole plot per iteration
 epoch = 400  # passes over the training plots; data loop = epoch // eval_epoch = 10
-eval_epoch = 40  # trainer epochs, each followed by an evaluation on the test split
+eval_epoch = 40  # trainer epochs, each followed by an evaluation
 clip_grad = 1.0
 enable_amp = False
 empty_cache = True
@@ -50,10 +49,8 @@ model = dict(
         chunk_size=102400,
         lact_head_dim=64,
         lact_base_lr=1e-2,
-        lact_use_muon=True,
         lact_enc_stages=[3, 4],
         lact_dec_stages=[0, 1, 2, 3],
-        freeze_backbone=False,
         train_with_ttt=False,
         in_channels=3,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
@@ -73,18 +70,6 @@ model = dict(
         proj_drop=0.0,
         drop_path=0.0,
         shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
     ),
     criteria=[
         dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
@@ -133,9 +118,8 @@ data = dict(
             dict(type="ToTensor"),
             dict(type="Collect", keys=("coord", "grid_coord", "segment"), feat_keys=("coord",)),
         ],
-        test_mode=False,
     ),
-    val=dict(  # the test split, with the pipeline of the evaluation config
+    val=dict(  # the pipeline of the evaluation config
         type="ForAINetV2Dataset",
         split="test",
         data_root=data_root,
@@ -158,6 +142,5 @@ data = dict(
                 feat_keys=("coord",),
             ),
         ],
-        test_mode=False,
     ),
 )

@@ -4,36 +4,28 @@
 # flash-attn (prebuilt wheel) and pointops (compiled from libs/pointops).
 #
 # Usage (from any directory):
-#   bash scripts/setup_env.sh                                                # ./env, torch 2.5.0+cu124 (A100 / H100 / ...)
-#   ENV_PREFIX=$PWD/env-torch2.7 TORCH_VER=2.7.1 bash scripts/setup_env.sh  # Blackwell GPUs (B200, sm_100): torch 2.7.1+cu128
-#   ENV_PREFIX=/data/envs/pointtt bash scripts/setup_env.sh                  # env somewhere else
-#   USE_CONDA_GCC=1 bash scripts/setup_env.sh                                # host without a gcc 9-13
-# scripts/train.sh and scripts/test.sh use ./env/bin/python if it exists; otherwise set PYTHON=<prefix>/bin/python.
-# Re-running resumes after the last finished stage (stamp files in $ENV_PREFIX/.setup_stamps).
-# One prefix holds one torch version: build another TORCH_VER into its own ENV_PREFIX.
+#   bash scripts/setup_env.sh                       # ./env, torch 2.5.0+cu124 (A100 / H100 / ...)
+#   TORCH_VER=2.7.1 bash scripts/setup_env.sh       # Blackwell GPUs (B200, sm_100): torch 2.7.1+cu128
+#   USE_CONDA_GCC=1 bash scripts/setup_env.sh       # host without a gcc 9-13
+# scripts/train.sh and scripts/test.sh use ./env/bin/python.
+# Re-running resumes after the last finished stage (stamp files in ./env/.setup_stamps).
+# ./env holds one torch version: for the other TORCH_VER, delete ./env first.
 # On a node without GPU the build still finishes; the closing smoke test then runs with --no-forward and
 # the script prints the command for the full test, to be run once on a GPU node.
 #
 # Knobs (env vars):
-#   ENV_PREFIX            conda env location                      (default: <repo>/env)
 #   TORCH_VER             2.5.0 | 2.7.1                            (default: 2.5.0; 2.7.1 = +cu128 for Blackwell)
-#   CONDA_EXE_OVERRIDE    conda front-end to use                   (default: the first of mamba, conda, micromamba
-#                         on PATH, then $MAMBA_EXE)
 #   USE_CONDA_GCC=1       install gcc/g++ 11 from conda-forge into the env and compile pointops with it
-#   TORCH_CUDA_ARCH_LIST  GPU architectures pointops is compiled for (default "8.0 8.6 9.0" = A100, A40/A6000,
-#                         H100; with TORCH_VER=2.7.1 "8.0 8.6 9.0 10.0", which adds B200)
-#   USE_SYSTEM_CUDA=1     use an nvcc already on PATH / $CUDA_HOME instead of installing the conda toolkit
-#   FA_VER                flash-attn release to take the prebuilt wheel from (default 2.8.3; with torch 2.5.0 and
-#                         glibc < 2.32 the script falls back to 2.7.4.post1)
-#   SKIP_SMOKE=1          do not run scripts/smoke_test_env.py at the end
-#   KEEP_CACHE=1          keep $ENV_PREFIX/.cache (pip cache, downloaded wheels) instead of deleting it at the end
+# conda front-end: the first of mamba, conda, micromamba on PATH, then $MAMBA_EXE. pointops is compiled for
+# "8.0 8.6 9.0" (A100, A40/A6000, H100), with TORCH_VER=2.7.1 for "8.0 8.6 9.0 10.0" (adds B200). flash-attn
+# comes from the prebuilt 2.8.3 wheel (with torch 2.5.0 and glibc < 2.32 from 2.7.4.post1).
 # =============================================================================
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ENV_PREFIX=${ENV_PREFIX:-$REPO/env}
+ENV_PREFIX=$REPO/env
 TORCH_VER=${TORCH_VER:-2.5.0}
-CONSTRAINTS=${CONSTRAINTS:-$REPO/requirements/constraints.txt}
+CONSTRAINTS=$REPO/requirements/constraints.txt
 SMOKE=$REPO/scripts/smoke_test_env.py
 POINTOPS_SRC=$REPO/libs/pointops
 
@@ -50,24 +42,23 @@ case "$TORCH_VER" in
          DROP_PINS="sympy" ;;                                # torch 2.7 requires sympy >= 1.13.3
   *) echo "unsupported TORCH_VER=$TORCH_VER (use 2.5.0 or 2.7.1)"; exit 2 ;;
 esac
-export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-$ARCH_DEFAULT}
-FA_VER=${FA_VER:-2.8.3}
+export TORCH_CUDA_ARCH_LIST=$ARCH_DEFAULT
+FA_VER=2.8.3
 
 # ---- isolation -------------------------------------------------------------------------------------
 # keep ~/.local/lib/python3.11/site-packages out of the env
 export PYTHONNOUSERSITE=1
 # pip cache and temp dir on the env's filesystem: installing a wheel across filesystems can fail with
 # "[Errno 18] Invalid cross-device link"
-mkdir -p "$(dirname "$ENV_PREFIX")"
-export PIP_CACHE_DIR=${PIP_CACHE_DIR:-$ENV_PREFIX/.cache/pip}
-BUILD_TMP=${BUILD_TMP:-$ENV_PREFIX/.cache/tmp}          # becomes TMPDIR once the env exists
+export PIP_CACHE_DIR=$ENV_PREFIX/.cache/pip
+BUILD_TMP=$ENV_PREFIX/.cache/tmp          # becomes TMPDIR once the env exists
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 WHEEL_DIR=$ENV_PREFIX/.cache/wheels
 STAMPS=$ENV_PREFIX/.setup_stamps
 
 # micromamba is usually a shell function plus $MAMBA_EXE, not a binary on PATH
-CONDA=${CONDA_EXE_OVERRIDE:-$(command -v mamba || command -v conda || command -v micromamba || echo "${MAMBA_EXE:-}")}
-[ -n "$CONDA" ] || { echo "need conda, mamba or micromamba on PATH (or CONDA_EXE_OVERRIDE=/path/to/one of them)"; exit 2; }
+CONDA=$(command -v mamba || command -v conda || command -v micromamba || echo "${MAMBA_EXE:-}")
+[ -n "$CONDA" ] || { echo "need conda, mamba or micromamba on PATH"; exit 2; }
 
 log()   { echo; echo "########## [$(date '+%F %T')] STAGE: $* ##########"; }
 stage() { [ -f "$STAMPS/$1" ] && { echo "[skip] $1 (already done)"; return 1; } || return 0; }
@@ -121,9 +112,7 @@ torch_guard() {   # torch_guard optional|required   (optional: a prefix without 
   cat <<EOF
 
 ERROR: $ENV_PREFIX holds torch $have, but this run asks for TORCH_VER=$TORCH_VER (torch ${TORCH_VER}+${CU}).
-  Build the other version into a prefix of its own, e.g.
-    ENV_PREFIX=$REPO/env-torch${TORCH_VER%.*} TORCH_VER=$TORCH_VER bash scripts/setup_env.sh
-  or delete $ENV_PREFIX and run this command again.
+  Delete $ENV_PREFIX and run this command again.
 EOF
   exit 2
 }
@@ -182,41 +171,32 @@ fi
 if stage 4_pydeps; then
   log "4/7 python packages (versions pinned by $CONSTRAINTS)"
   $PIP install -c "$CONSTRAINTS" \
-      numpy scipy h5py plyfile pyyaml packaging addict yapf termcolor timm einops tensorboardx tqdm
+      numpy h5py plyfile addict yapf timm einops
   done_ 4_pydeps
 fi
 
 # ---- 5/7 CUDA toolkit (nvcc + headers) for building pointops ------------------------------------------------------
 if stage 5_cuda_toolkit; then
-  if [ "${USE_SYSTEM_CUDA:-0}" = "1" ]; then
-    log "5/7 cuda-toolkit: using system nvcc ($(command -v nvcc || echo "${CUDA_HOME:-?}/bin/nvcc"))"
-  else
-    log "5/7 cuda-toolkit ${CUDA_LABEL#cuda-} into the env (nvcc for source builds)"
-    # torch's ATen/cuda/CUDAContext.h needs cusparse.h / cublas_v2.h / cusolverDn.h, so nvcc alone is not enough
-    # shellcheck disable=SC2086
-    "$CONDA" install -y -p "$ENV_PREFIX" --override-channels -c "nvidia/label/$CUDA_LABEL" -c conda-forge \
-        ${CUDA_CONDA_PKGS:-cuda-nvcc cuda-cudart-dev libcublas-dev libcusparse-dev libcusolver-dev}
-  fi
+  log "5/7 cuda-toolkit ${CUDA_LABEL#cuda-} into the env (nvcc for source builds)"
+  # torch's ATen/cuda/CUDAContext.h needs cusparse.h / cublas_v2.h / cusolverDn.h, so nvcc alone is not enough
+  "$CONDA" install -y -p "$ENV_PREFIX" --override-channels -c "nvidia/label/$CUDA_LABEL" -c conda-forge \
+      cuda-nvcc cuda-cudart-dev libcublas-dev libcusparse-dev libcusolver-dev
   done_ 5_cuda_toolkit
 fi
-if [ "${USE_SYSTEM_CUDA:-0}" = "1" ]; then
-  : "${CUDA_HOME:=$(dirname "$(dirname "$(command -v nvcc)")")}"
-else
-  CUDA_HOME=$ENV_PREFIX
-  export CPATH=$ENV_PREFIX/include${CPATH:+:$CPATH}
-  export LIBRARY_PATH=$ENV_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}
-  # the conda packages of CUDA 12.8 keep headers and libraries in targets/x86_64-linux
-  if [ -d "$ENV_PREFIX/targets/x86_64-linux/include" ]; then
-    export CPATH=$ENV_PREFIX/targets/x86_64-linux/include:$CPATH
-    export LIBRARY_PATH=$ENV_PREFIX/targets/x86_64-linux/lib:$LIBRARY_PATH
-  fi
+CUDA_HOME=$ENV_PREFIX
+export CPATH=$ENV_PREFIX/include${CPATH:+:$CPATH}
+export LIBRARY_PATH=$ENV_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}
+# the conda packages of CUDA 12.8 keep headers and libraries in targets/x86_64-linux
+if [ -d "$ENV_PREFIX/targets/x86_64-linux/include" ]; then
+  export CPATH=$ENV_PREFIX/targets/x86_64-linux/include:$CPATH
+  export LIBRARY_PATH=$ENV_PREFIX/targets/x86_64-linux/lib:$LIBRARY_PATH
 fi
 export CUDA_HOME
 
 # ---- 6/7 flash-attn (prebuilt wheel) ---------------------------------------------------------------------------------
 if stage 6_flash_attn; then
   GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}'); GLIBC=${GLIBC:-0}
-  if [ "$FA_VER" = "2.8.3" ] && [ "$(printf '%s\n' 2.32 "$GLIBC" | sort -V | head -1)" != "2.32" ]; then
+  if [ "$(printf '%s\n' 2.32 "$GLIBC" | sort -V | head -1)" != "2.32" ]; then
     if [ "$TORCH_VER" = "2.5.0" ]; then
       echo "[warn] glibc $GLIBC < 2.32: the v2.8.3 wheel will not import here -> using v2.7.4.post1 (glibc >= 2.14)"
       FA_VER=2.7.4.post1
@@ -245,33 +225,29 @@ if stage 7_pointops; then
   done_ 7_pointops
 fi
 
-# ---- record + smoke test -------------------------------------------------------------------------------------------------
+# ---- smoke test --------------------------------------------------------------------------------------------------------
 torch_guard required
-$PIP list --format=freeze > "$ENV_PREFIX/pip-freeze.txt"; echo "wrote $ENV_PREFIX/pip-freeze.txt ($(wc -l < "$ENV_PREFIX/pip-freeze.txt") packages)"
 
 SMOKE_RC=0; NO_GPU=0
 SMOKE_CMD="PYTHONNOUSERSITE=1 $PY $SMOKE --expect-torch $TORCH_VER"
-if [ "${SKIP_SMOKE:-0}" != "1" ]; then
-  SMOKE_ARGS="--expect-torch $TORCH_VER"
-  if $PY -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)"; then
-    log "SMOKE TEST"
-  else
-    NO_GPU=1; SMOKE_ARGS="$SMOKE_ARGS --no-forward"
-    log "SMOKE TEST (--no-forward: no usable GPU on this node)"
-  fi
-  # shellcheck disable=SC2086
-  $PY "$SMOKE" $SMOKE_ARGS || SMOKE_RC=$?
+SMOKE_ARGS="--expect-torch $TORCH_VER"
+if $PY -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+  log "SMOKE TEST"
+else
+  NO_GPU=1; SMOKE_ARGS="$SMOKE_ARGS --no-forward"
+  log "SMOKE TEST (--no-forward: no usable GPU on this node)"
 fi
+# shellcheck disable=SC2086
+$PY "$SMOKE" $SMOKE_ARGS || SMOKE_RC=$?
 
 # pip cache / downloaded wheels / build temp live inside the env prefix; removed only after the smoke test
-if [ "${KEEP_CACHE:-0}" != "1" ]; then rm -rf "$ENV_PREFIX/.cache"; fi
+rm -rf "$ENV_PREFIX/.cache"
 
 if [ "$SMOKE_RC" != 0 ]; then
   cat <<EOF
 
 SMOKE TEST FAILED (exit code $SMOKE_RC): the [FAIL] lines above name the checks.
-The build stages are finished, so re-running this script only repeats the test (pointops is rebuilt
-after \`rm $STAMPS/7_pointops\`, e.g. for another TORCH_CUDA_ARCH_LIST). To repeat only the test:
+The build stages are finished, so re-running this script only repeats the test. To repeat only the test:
   $SMOKE_CMD
 EOF
   exit "$SMOKE_RC"
@@ -280,7 +256,7 @@ fi
 cat <<EOF
 
 Environment ready:  $PY
-scripts/train.sh and scripts/test.sh use ./env/bin/python if it exists; otherwise run them with PYTHON=$PY
+scripts/train.sh and scripts/test.sh use it.
 EOF
 if [ "$NO_GPU" = 1 ]; then
   cat <<EOF

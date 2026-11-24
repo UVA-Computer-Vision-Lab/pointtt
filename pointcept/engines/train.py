@@ -5,26 +5,17 @@ Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 
 TrainerBase follows the hook-based training loop of detectron2 (Apache-2.0).
-Modified for PoinTTT: optional W&B logging (`enable_wandb`), evaluation-only runs
-(`is_train = False`), gradient accumulation (`grad_accum_steps`), support for models that
-run backward() inside their forward pass (StreamingSegmentorV2), and single-process
-reproductions of multi-GPU runs (`ddp_emulate_world_size`, `ddp_replay_world_size`).
+Modified for PoinTTT: evaluation-only runs (`is_train = False`), gradient accumulation
+(`grad_accum_steps`), support for models that run backward() inside their forward pass
+(StreamingSegmentorV2), and single-process reproductions of multi-GPU runs
+(`ddp_emulate_world_size`, `ddp_replay_world_size`); no TensorBoard or W&B logging.
 """
 
 import os
-import sys
 import weakref
 import torch
-import torch.nn as nn
 import torch.utils.data
-import torch.distributed as dist
 from functools import partial
-
-if sys.version_info >= (3, 10):
-    from collections.abc import Iterator
-else:
-    from collections import Iterator
-from tensorboardX import SummaryWriter
 
 from .defaults import create_ddp_model, worker_init_fn
 from .hooks import HookBase, build_hooks
@@ -36,11 +27,6 @@ from pointcept.utils.optimizer import build_optimizer
 from pointcept.utils.scheduler import build_scheduler
 from pointcept.utils.events import EventStorage, ExceptionWriter
 from pointcept.utils.registry import Registry
-
-try:
-    import wandb
-except ImportError:
-    wandb = None
 
 TRAINERS = Registry("trainers")
 
@@ -89,12 +75,7 @@ class TrainerBase:
         self.hooks = []
         self.epoch = 0
         self.start_epoch = 0
-        self.max_epoch = 0
-        self.max_iter = 0
         self.comm_info = dict()
-        self.data_iterator: Iterator = enumerate([])
-        self.storage: EventStorage
-        self.writer: SummaryWriter
 
     def register_hooks(self, hooks) -> None:
         hooks = build_hooks(hooks)
@@ -107,29 +88,6 @@ class TrainerBase:
             h.trainer = weakref.proxy(self)
         self.hooks.extend(hooks)
 
-    def train(self):
-        with EventStorage() as self.storage:
-            # => before train
-            self.before_train()
-            for self.epoch in range(self.start_epoch, self.max_epoch):
-                # => before epoch
-                self.before_epoch()
-                # => run_epoch
-                for (
-                    self.comm_info["iter"],
-                    self.comm_info["input_dict"],
-                ) in self.data_iterator:
-                    # => before_step
-                    self.before_step()
-                    # => run_step
-                    self.run_step()
-                    # => after_step
-                    self.after_step()
-                # => after epoch
-                self.after_epoch()
-            # => after train
-            self.after_train()
-
     def before_train(self):
         for h in self.hooks:
             h.before_train()
@@ -141,9 +99,6 @@ class TrainerBase:
     def before_step(self):
         for h in self.hooks:
             h.before_step()
-
-    def run_step(self):
-        raise NotImplementedError
 
     def after_step(self):
         for h in self.hooks:
@@ -159,16 +114,12 @@ class TrainerBase:
         comm.synchronize()
         for h in self.hooks:
             h.after_train()
-        if comm.is_main_process():
-            self.writer.close()
 
 
 @TRAINERS.register_module("DefaultTrainer")
 class Trainer(TrainerBase):
     def __init__(self, cfg):
         super(Trainer, self).__init__()
-        self.epoch = 0
-        self.start_epoch = 0
         self.max_epoch = cfg.eval_epoch
         self.best_metric_value = -torch.inf
         self.logger = get_root_logger(
@@ -181,8 +132,6 @@ class Trainer(TrainerBase):
         self.logger.info(f"Config:\n{cfg.pretty_text}")
         self.logger.info("=> Building model ...")
         self.model = self.build_model()
-        self.logger.info("=> Building writer ...")
-        self.writer = self.build_writer()
         self.logger.info("=> Building train dataset & dataloader ...")
         if self.cfg.is_train:
             self.train_loader = self.build_train_loader()
@@ -192,7 +141,7 @@ class Trainer(TrainerBase):
         if self.cfg.is_train:
             self.optimizer = self.build_optimizer()
             self.scheduler = self.build_scheduler()
-        self.scaler = self.build_scaler()
+            self.scaler = self.build_scaler()
         self.logger.info("=> Building hooks ...")
         self.register_hooks(self.cfg.hooks)
 
@@ -215,31 +164,11 @@ class Trainer(TrainerBase):
         self.cfg.scheduler.total_steps = steps_per_epoch * self.cfg.eval_epoch
         return build_scheduler(self.cfg.scheduler, self.optimizer)
 
-    def init_wandb(self):
-        """Optional Weights & Biases logging, enabled with `enable_wandb = True` in the config."""
-        if not (comm.is_main_process() and getattr(self.cfg, "enable_wandb", False)):
-            return
-        if wandb is None:
-            self.logger.warning("enable_wandb is set but wandb is not installed: W&B logging disabled.")
-            return
-        try:
-            wandb.init(
-                project=getattr(self.cfg, "project_name", "pointtt"),
-                name=getattr(self.cfg, "experiment_name", "default_experiment"),
-            )
-        except Exception as e:
-            # no W&B login / network on this machine: keep going without W&B
-            self.logger.warning(
-                f"wandb.init failed ({type(e).__name__}: {e}); "
-                "W&B logging disabled for this run."
-            )
-
     def train(self):
         with EventStorage() as self.storage, ExceptionWriter():
             # => before train
             self.before_train()
             self.logger.info(">>>>>>>>>>>>>>>> Start Training >>>>>>>>>>>>>>>>")
-            self.init_wandb()
 
             if self.cfg.is_train:
                 for self.epoch in range(self.start_epoch, self.max_epoch):
@@ -290,28 +219,16 @@ class Trainer(TrainerBase):
         # StreamingSegmentorV2 runs backward() chunk by chunk inside its forward pass and
         # returns a detached loss flagged with `_skip_backward`.
         skip_backward = getattr(loss, "_skip_backward", False)
-        if (
-            skip_backward
-            and comm.get_world_size() > 1
-            and getattr(self.cfg, "streaming_grad_sync", False)
-        ):
-            self._average_grads_across_ranks()
         if not skip_backward and accum_steps > 1:
             loss = loss / accum_steps
         if not skip_backward and is_first_micro:
             self.optimizer.zero_grad()
-        grad_norm = None
         if self.cfg.enable_amp:
             if not skip_backward:
                 self.scaler.scale(loss).backward()
             if is_update_step:
                 if not skip_backward:
                     self.scaler.unscale_(self.optimizer)
-                if self.cfg.clip_grad is not None:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.cfg.clip_grad
-                    )
-                if not skip_backward:
                     self.scaler.step(self.optimizer)
                     scaler = self.scaler.get_scale()
                     self.scaler.update()
@@ -321,11 +238,10 @@ class Trainer(TrainerBase):
                     self.optimizer.step()
                     self.scheduler.step()
         else:
-            if not skip_backward:
-                loss.backward()
+            assert skip_backward, "fp32 training is used with StreamingSegmentorV2 only (backward runs inside forward)"
             if is_update_step:
                 if self.cfg.clip_grad is not None:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                    torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.cfg.clip_grad
                     )
                 self.optimizer.step()
@@ -333,65 +249,12 @@ class Trainer(TrainerBase):
         if self.cfg.empty_cache:
             torch.cuda.empty_cache()
         self.comm_info["model_output_dict"] = output_dict
-        if wandb is not None and wandb.run is not None and comm.is_main_process():
-            wandb.log(
-                {
-                    "loss": loss.item(),
-                    "grad_norm": grad_norm.item() if grad_norm is not None else None,
-                    "learning_rate": self.scheduler.get_last_lr()[0],
-                }
-            )
-
-    def _average_grads_across_ranks(self):
-        """Average `.grad` over all DDP ranks (what DDP normally does itself).
-
-        StreamingSegmentorV2 calls backward() inside forward() and returns a
-        detached loss, so DDP's reducer never sees a backward pass it can hook
-        into. With `streaming_grad_sync = True` the gradients are averaged here
-        instead; off by default.
-        """
-        params = [p for p in self.model.parameters() if p.requires_grad]
-        had_grad = [p.grad is not None for p in params]
-        flat = torch.cat(
-            [
-                (p.grad if g else torch.zeros_like(p)).reshape(-1).float()
-                for p, g in zip(params, had_grad)
-            ]
-        )
-        # number of ranks holding a grad per parameter: one that has a grad on
-        # any rank gets the same averaged grad on every rank (as DDP does)
-        n_ranks = torch.tensor(had_grad, dtype=torch.float32, device=flat.device)
-        dist.all_reduce(flat)
-        dist.all_reduce(n_ranks)
-        flat /= comm.get_world_size()
-        offset = 0
-        for p, g, any_rank in zip(params, had_grad, n_ranks.tolist()):
-            n = p.numel()
-            avg = flat[offset : offset + n].view_as(p)
-            offset += n
-            if g:
-                p.grad.copy_(avg)
-            elif any_rank > 0:
-                p.grad = avg.to(p.dtype).clone()
-
-    def after_epoch(self):
-        for h in self.hooks:
-            h.after_epoch()
-        self.storage.reset_histories()
-        if self.cfg.empty_cache_per_epoch:
-            torch.cuda.empty_cache()
 
     def build_model(self):
         model = build_model(self.cfg.model)
-        if self.cfg.sync_bn:
-            model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        # logger.info(f"Model: \n{self.model}")
         self.logger.info(f"Num params: {n_parameters}")
-        ddp_kwargs = dict(
-            broadcast_buffers=False,
-            find_unused_parameters=self.cfg.find_unused_parameters,
-        )
+        ddp_kwargs = dict(broadcast_buffers=False)
         # static_graph=True is required when the wrapped module calls
         # backward() multiple times per forward (e.g. chunk-wise per-chunk
         # backward in PT-v3-LaCT-Dec / PT-v3-LaCT-Temporal). Without it DDP
@@ -400,11 +263,6 @@ class Trainer(TrainerBase):
             ddp_kwargs["static_graph"] = True
         model = create_ddp_model(model.cuda(), **ddp_kwargs)
         return model
-
-    def build_writer(self):
-        writer = SummaryWriter(self.cfg.save_path) if comm.is_main_process() else None
-        self.logger.info(f"Tensorboard writer logging dir: {self.cfg.save_path}")
-        return writer
 
     def build_train_loader(self):
         train_data = build_dataset(self.cfg.data.train)
@@ -434,23 +292,19 @@ class Trainer(TrainerBase):
             # One process that sees exactly the data stream of rank 0 in an
             # `emulate`-process run (same shard of every epoch's permutation,
             # same number of iterations per epoch). A StreamingSegmentorV2 run
-            # without `streaming_grad_sync` never averages gradients across
-            # ranks, so this process trains exactly like rank 0 of that run.
+            # never averages gradients across ranks (its backward passes run
+            # inside forward), so this process trains exactly like rank 0 of that run.
             train_sampler = torch.utils.data.distributed.DistributedSampler(
                 train_data, num_replicas=emulate, rank=0
             )
         else:
             train_sampler = None
 
-        init_fn = (
-            partial(
-                worker_init_fn,
-                num_workers=self.cfg.num_worker_per_gpu,
-                rank=comm.get_rank(),
-                seed=self.cfg.seed,
-            )
-            if self.cfg.seed is not None
-            else None
+        init_fn = partial(
+            worker_init_fn,
+            num_workers=self.cfg.num_worker_per_gpu,
+            rank=comm.get_rank(),
+            seed=self.cfg.seed,
         )
 
         train_loader = torch.utils.data.DataLoader(
